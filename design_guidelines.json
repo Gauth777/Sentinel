@@ -1,0 +1,130 @@
+{
+  "app_name": "Sentinel",
+  "personality": "7 Dark-First Utility DARK",
+  "personality_one_liner": "A premium, tactical, and cinematic command-center interface built for maximum driver awareness, prioritizing live metrics and hazard visualization over decorative chrome.",
+  "color": {
+    "surface": "#090A0C",
+    "onSurface": "#E2E8F0",
+    "surfaceSecondary": "#111418",
+    "onSurfaceSecondary": "#94A3B8",
+    "surfaceTertiary": "#1E232A",
+    "onSurfaceTertiary": "#64748B",
+    "surfaceInverse": "#F8FAFC",
+    "onSurfaceInverse": "#000000",
+    "brand": "#00F0FF",
+    "brandPrimary": "#00F0FF",
+    "onBrandPrimary": "#000000",
+    "brandSecondary": "#3399FF",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#00F0FF",
+    "onBrandTertiary": "#000000",
+    "success": "#2EA043",
+    "onSuccess": "#FFFFFF",
+    "warning": "#D29922",
+    "onWarning": "#000000",
+    "error": "#F85149",
+    "onError": "#FFFFFF",
+    "info": "#3399FF",
+    "onInfo": "#FFFFFF",
+    "border": "#21262D",
+    "borderStrong": "#30363D",
+    "divider": "#1E232A"
+  },
+  "typography": {
+    "displayFontFamily": "Inter",
+    "textFontFamily": "Inter",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24,
+      "3xl": 32,
+      "4xl": 48
+    }
+  },
+  "spacing": {
+    "rule": "Strict 8pt grid. Metrics dominate the screen with deliberate, function-first padding. Generous touch targets (min 48dp).",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 4,
+    "md": 8,
+    "lg": 12,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "stack_only",
+  "icon_set": "MaterialCommunityIcons",
+  "glassmorphism": {
+    "enabled": "false",
+    "do's": [
+      "Use solid surfaceSecondary or translucent gradient overlays for tactical panels."
+    ],
+    "dont's": [
+      "No Apple-style heavy blur. Keep it utilitarian, sharp, and outdoor-readable."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "solid surfaceSecondary",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "GhostVision",
+      "purpose": "Tactical top-down representation of the road highlighting unseen hazards and live telemetry.",
+      "states": {
+        "loading": "Dark tactical grid with a sweeping cyan radar line indicating initialization.",
+        "empty": "Ghost Vision active, no nearby hazards. Clean road polyline and radar sweep.",
+        "error": "Sensor connection lost. Red warning banner with retry button over a dimmed map."
+      },
+      "layout": "1. Top Status Strip (flex-row, sticky top, z-index 10): Connection icon (wifi/radio-tower), GPS crosshairs, prominent Speedometer (large bold number '42 km/h'), Road Name ('GST Road Northbound'), network bars.\n2. Main Tactical Map Area (flex: 1, relative positioning): Deep black background. Use vector shapes or a dark map texture. User vehicle centered in lower 1/3 (cyan triangle/arrow). Thin white/grey vector lines for road geometry. FOV Cone: `expo-linear-gradient` (cyan, opacity 0 to 15%) projecting upward. Hidden Hazard Marker: glowing amber/red pulse dot with a distance label pill (e.g., '180m'). Radar sweep: concentric SVG rings + animated sweep arc (cyan 10%). Nearby Sentinel vehicles: small secondary blue indicators.\n3. Hazard Info Card (absolute positioned in lower third above actions): `surfaceSecondary` background, border `borderStrong`. Type ('Stationary vehicle'), Distance, Confidence ('91%'), Source, Age ('8 sec ago'), direction arrows, and Recommended Action ('Reduce speed'). High risk text in `warning` or `error` color.\n4. Bottom Action Area (flex-row, sticky bottom, padding `lg`): Return to Drive View, Confirm Hazard (Check), Report Incorrect (Alert octagon), Mute (Volume-off). Buttons should have min 48dp touch targets, using `surfaceTertiary` with icon over text."
+    },
+    {
+      "name": "DriveHUD",
+      "purpose": "Primary standard driving view, stub screen to transition into Ghost Vision.",
+      "states": {
+        "loading": "Centered spinner",
+        "empty": "N/A",
+        "error": "Error loading Drive View"
+      },
+      "layout": "Centered large primary action 'Engage Ghost Vision' button (cyan) on a dark cinematic surface, displaying basic speed and route metrics."
+    }
+  ],
+  "images": {
+    "tactical_map_bg": {
+      "url": "https://images.unsplash.com/photo-1544411047-c491e34a24e0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1NzZ8MHwxfHNlYXJjaHwxfHxkYXJrJTIwbmlnaHQlMjBjaXR5JTIwc3RyZWV0JTIwbWFwJTIwdGV4dHVyZXxlbnwwfHx8fDE3ODE5ODg5OTZ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Dark aerial view of a city map at night"
+    }
+  },
+  "haptics": {
+    "EngageGhostVision": "heavy",
+    "ConfirmHazard": "medium",
+    "ReportIncorrect": "medium",
+    "MuteAlert": "light",
+    "HazardDetectedPulse": "warning"
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Dark-First Utility DARK guidelines. Do not use generic indigo/purple/blue templates. The primary accent is #00F0FF (Cool Cyan) and secondary is #3399FF (Electric Blue).",
+    "Ensure touch targets are at least 48x48dp for all bottom action buttons (Confirm, Report, Mute).",
+    "The Ghost Vision tactical map should look like a heads-up display. Use `expo-linear-gradient` for the FOV cone and SVG/View concentric circles for the radar sweep.",
+    "Prominent numerical values (Speed, Distance, Confidence) must use the Inter font, ideally at larger scale sizes (xl, 2xl, or custom 3xl for speed). Cap weight at 500.",
+    "Do not use glassmorphism / heavy blur here. This is a tactical Android-first interface. Use solid `surfaceSecondary` (#111418) or `surfaceTertiary` (#1E232A) for overlays like the Hazard Info Card.",
+    "Include specific MaterialCommunityIcons: radio-tower (connection), crosshairs-gps (GPS), speedometer (speed), car-brake-alert (hazard), radar (radar), check-circle-outline (confirm), alert-octagon-outline (report), volume-off (mute).",
+    "Motion: Transitions and radar sweeps should be sharp and restrained (200-450ms). Use `react-native-reanimated` for a subtle looping radar pulse or opacity fade on the hazard marker."
+  ]
+}
