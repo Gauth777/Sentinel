@@ -27,6 +27,8 @@ type Props = {
   /** Override map bounds (used in Live Geo mode to follow the user). */
   boundsOverride?: Bounds;
   activeHazardId?: string;
+  /** Pause animations (e.g. while the screen is unfocused). */
+  paused?: boolean;
   onHazardPress?: (h: Hazard) => void;
 };
 
@@ -37,6 +39,7 @@ export default function WorldMap({
   egoOverride,
   boundsOverride,
   activeHazardId,
+  paused = false,
   onHazardPress,
 }: Props) {
   const ego = useMemo(
@@ -72,6 +75,7 @@ export default function WorldMap({
           hazards={worldModel.hazards}
           proj={proj}
           activeId={activeHazardId}
+          paused={paused}
         />
         <EgoMarker egoPx={egoPx} headingDeg={ego.headingDegrees} />
       </Svg>

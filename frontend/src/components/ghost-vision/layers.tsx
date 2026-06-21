@@ -229,19 +229,26 @@ export function GhostObjectLayer({
   hazards,
   proj,
   activeId,
+  paused = false,
 }: {
   hazards: Hazard[];
   proj: Projector;
   activeId?: string;
+  paused?: boolean;
 }) {
   const pulse = useSharedValue(0);
   React.useEffect(() => {
+    if (paused) {
+      // Cancel any running animation so the pulse stops while the screen is unfocused.
+      pulse.value = 0;
+      return;
+    }
     pulse.value = withRepeat(
       withTiming(1, { duration: 1800, easing: Easing.out(Easing.quad) }),
       -1,
       false
     );
-  }, [pulse]);
+  }, [pulse, paused]);
 
   const pulseProps = useAnimatedProps(() => ({
     r: interpolate(pulse.value, [0, 1], [12, 44]),

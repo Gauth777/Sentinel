@@ -14,6 +14,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import { useRouter, useFocusEffect } from "expo-router";
+import { useIsFocused } from "@react-navigation/native";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { useGhostVisionData } from "@/src/hooks/useGhostVisionData";
 import { useSentinelLocation } from "@/src/hooks/useSentinelLocation";
@@ -35,23 +36,35 @@ export default function GhostVisionScreen() {
   const { worldModel, status, source, loading, error, confirm, report } =
     useGhostVisionData();
   const loc = useSentinelLocation();
+  const isFocused = useIsFocused();
 
-  const [active, setActive] = useState<Hazard | null>(null);
+  // Store only the id; derive the live hazard from worldModel so confirm/report
+  // counter updates don't reset which hazard the user has selected.
+  const [activeHazardId, setActiveHazardId] = useState<string | null>(null);
   const [cardExpanded, setCardExpanded] = useState(false);
   const [muted, setMuted] = useState(false);
   const [actionFlash, setActionFlash] = useState<string | null>(null);
   const spokenForId = useRef<string | null>(null);
 
-  // Pick the primary hazard once world model loads.
+  // Pick the primary hazard the first time the world model loads (and only if
+  // nothing is selected yet, or the selected id no longer exists).
   useEffect(() => {
     if (!worldModel) return;
-    const primary =
-      worldModel.hazards.find((h) => h.routeRelevance === "high") ??
-      worldModel.hazards.find((h) => h.risk === "high") ??
-      worldModel.hazards[0] ??
-      null;
-    setActive(primary);
+    setActiveHazardId((prev) => {
+      if (prev && worldModel.hazards.some((h) => h.id === prev)) return prev;
+      const primary =
+        worldModel.hazards.find((h) => h.routeRelevance === "high") ??
+        worldModel.hazards.find((h) => h.risk === "high") ??
+        worldModel.hazards[0] ??
+        null;
+      return primary ? primary.id : null;
+    });
   }, [worldModel]);
+
+  const active: Hazard | null = useMemo(() => {
+    if (!worldModel || !activeHazardId) return null;
+    return worldModel.hazards.find((h) => h.id === activeHazardId) ?? null;
+  }, [worldModel, activeHazardId]);
 
   // TTS voice alert (once per hazard, unless muted).
   useEffect(() => {
@@ -67,6 +80,14 @@ export default function GhostVisionScreen() {
   }, [active, muted]);
 
   // Pause animations / TTS when screen loses focus.
+  // Pause speech (and animations via the `paused` prop below) whenever the screen
+  // loses focus. This is the single source of truth for animation pausing.
+  useEffect(() => {
+    if (!isFocused) {
+      Speech.stop();
+    }
+  }, [isFocused]);
+
   useFocusEffect(
     useCallback(() => {
       return () => {
@@ -198,9 +219,10 @@ export default function GhostVisionScreen() {
               egoOverride={liveOverride.egoOverride}
               boundsOverride={liveOverride.boundsOverride}
               activeHazardId={active?.id}
+              paused={!isFocused}
               onHazardPress={(h) => {
                 Haptics.selectionAsync().catch(() => {});
-                setActive(h);
+                setActiveHazardId(h.id);
                 spokenForId.current = null; // allow voice for the new active
               }}
             />
@@ -249,19 +271,21 @@ export default function GhostVisionScreen() {
                   { color: isLiveGeo ? colors.success : colors.warning },
                 ]}
               >
-                {isLiveGeo ? "LIVE GEO · SIMULATED OVERLAYS" : "DEMO SCENARIO · SIMULATED TELEMETRY"}
+                {isLiveGeo
+                  ? "GPS POSITION PREVIEW · EXPERIMENTAL"
+                  : "DEMO SCENARIO · SIMULATED TELEMETRY"}
               </Text>
             </View>
 
             {/* Attribution */}
             <Text style={styles.attribution} testID="map-attribution">
-              © OpenStreetMap contributors · Demo derived layout
+              Synthetic GST Road demo scenario
             </Text>
 
             <MapLegend />
           </View>
 
-          {/* Live-Geo controls */}
+          {/* GPS Position Preview controls (Experimental — hidden from primary demo path). */}
           {!isLiveGeo && (
             <View style={styles.modeRow}>
               <Pressable
@@ -270,10 +294,20 @@ export default function GhostVisionScreen() {
                 testID="engage-live-geo-button"
                 android_ripple={{ color: "#003844" }}
               >
-                <MaterialCommunityIcons name="satellite-variant" size={16} color={colors.brand} />
-                <Text style={styles.modeBtnText}>
-                  {loc.mode === "requesting" ? "Requesting GPS…" : "Use Live Geo (GPS)"}
-                </Text>
+                <MaterialCommunityIcons name="map-marker-radius" size={16} color={colors.brand} />
+                <View style={{ flex: 1 }}>
+                  <View style={styles.modeBtnTitleRow}>
+                    <Text style={styles.modeBtnText}>
+                      {loc.mode === "requesting"
+                        ? "REQUESTING GPS…"
+                        : "GPS POSITION PREVIEW"}
+                    </Text>
+                    <Text style={styles.experimentalTag}>EXPERIMENTAL</Text>
+                  </View>
+                  <Text style={styles.modeBtnHint}>
+                    Uses live device position with simulated Sentinel world-model overlays. Roads and buildings around your real location are not loaded.
+                  </Text>
+                </View>
               </Pressable>
               {loc.mode !== "idle" && loc.mode !== "requesting" && (
                 <Pressable
@@ -600,17 +634,41 @@ const styles = StyleSheet.create({
   },
   modeBtn: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: spacing.sm,
     borderWidth: 1,
     borderColor: colors.brand,
     backgroundColor: "rgba(0,240,255,0.06)",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
     borderRadius: radius.md,
-    minHeight: 44,
+    minHeight: 56,
+    flex: 1,
+  },
+  modeBtnTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    flexWrap: "wrap",
   },
   modeBtnText: { color: colors.brand, fontSize: fonts.size.sm, fontWeight: "500", letterSpacing: 1 },
+  experimentalTag: {
+    color: colors.warning,
+    fontSize: 9,
+    letterSpacing: 1.4,
+    fontWeight: "500",
+    borderWidth: 1,
+    borderColor: colors.warning,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  modeBtnHint: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 11,
+    marginTop: 4,
+    lineHeight: 16,
+  },
   modeBtnGhost: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,

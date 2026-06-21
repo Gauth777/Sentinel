@@ -249,11 +249,46 @@ ROAD_CORRIDOR = (
 )
 
 
+# ======================= Demo data migration (idempotent) =======================
+# Bump SEED_VERSION when the demo data shape changes. ensure_seed() upserts each
+# known demo document by `id`, replacing old-schema records in-place. It does NOT
+# touch unrelated collections or user-generated records.
+SEED_VERSION = 2
+
+
 async def ensure_seed() -> None:
-    if await db.hazards.count_documents({}) == 0:
-        await db.hazards.insert_many([dict(h) for h in SEED_HAZARDS])
-    if await db.nearby_vehicles.count_documents({}) == 0:
-        await db.nearby_vehicles.insert_many([dict(v) for v in SEED_VEHICLES])
+    """Idempotent demo-data migration.
+
+    - Tracks the applied seed version in db.sentinel_meta (single doc, id='seed').
+    - When the persisted version differs from SEED_VERSION (or is missing) the
+      known demo documents (hz-*, v-*) are upserted by `id`, replacing any
+      legacy-shape records left over from earlier app versions.
+    - Repeated startup with the same SEED_VERSION is a no-op fast path.
+    - Confirmed/reportedIncorrect counters are preserved across migrations.
+    """
+    meta = await db.sentinel_meta.find_one({"id": "seed"})
+    if meta and meta.get("version") == SEED_VERSION:
+        return  # already migrated to the current shape
+
+    # Migrate hazards: upsert each known demo hazard, keep counters if present.
+    for hz in SEED_HAZARDS:
+        existing = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0}) or {}
+        merged = dict(hz)
+        # Preserve counters from prior records when present.
+        merged["confirmed"] = int(existing.get("confirmed", hz.get("confirmed", 0)) or 0)
+        merged["reportedIncorrect"] = int(existing.get("reportedIncorrect", hz.get("reportedIncorrect", 0)) or 0)
+        await db.hazards.replace_one({"id": hz["id"]}, merged, upsert=True)
+
+    # Migrate nearby vehicles.
+    for v in SEED_VEHICLES:
+        await db.nearby_vehicles.replace_one({"id": v["id"]}, dict(v), upsert=True)
+
+    # Record applied seed version.
+    await db.sentinel_meta.replace_one(
+        {"id": "seed"},
+        {"id": "seed", "version": SEED_VERSION},
+        upsert=True,
+    )
 
 
 # ======================= App =======================
@@ -300,7 +335,7 @@ async def list_nearby_vehicles():
     return [NearbyVehicle(**d) for d in docs]
 
 
-@api_router.get("/sentinel/world-model")
+@api_router.get("/sentinel/world-model", response_model=WorldModel)
 async def get_world_model():
     """Return the structured local world model for Ghost Vision.
     telemetrySource is currently 'demo' (deterministic mock); future builds

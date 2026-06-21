@@ -1,86 +1,121 @@
-# Sentinel — Ghost Vision (Phase 2: Structured World Model)
+# Sentinel — Ghost Vision (Phase 3: Pre-merge corrections)
 
-## Vision
-Sentinel is a shared road-perception platform for Indian roads. One Sentinel-connected vehicle detects a road hazard and warns another vehicle approaching the same road segment before that hazard becomes visible. Ghost Vision is the structured, tactical local digital twin of the vehicle's surroundings — a fusion of three layers: a static OSM-derived world, the local perception view, and the shared Ghost view from other Sentinel vehicles.
+## What this phase fixes
 
-## Phase 2 — what changed
-- **Synthetic S-shaped road removed.** `TacticalMap.tsx` is gone. The Ghost Vision screen now renders from a structured `WorldModel` (`scenarioId`, `mapBounds`, `roads`, `buildings`, `occupiedRegions`, `nearbyVehicles`, `hazards`, `roadCorridor`, `ego`, `telemetrySource`) using a real lat/lon → pixel projection.
-- **Three visual layers**:
-  1. **Static world layer** — road geometry from the world model (GST Road + side roads), building footprints, safe driving corridor, geospatial grid.
-  2. **Local perception layer** — solid blue polygons for visible vehicles, amber polygons for road obstructions, dashed grey polygons for unknown occupied regions (semantic-free).
-  3. **Shared Ghost layer** — translucent + dashed footprints for hazards observed by other Sentinel vehicles (hz-001 stationary vehicle, hz-002 pothole). Visibility state is shown in the card (`HIDDEN · Beyond line of sight`).
-- **Route relevance** drives prominence: only `medium`/`high` hazards trigger TTS voice alerts. `low`/`none` items render quietly.
-- **Field-of-view cone** is aligned with the ego heading (not a fixed up-cone).
-- **Two operating modes**:
-  - **Demo Scenario Mode** — bundled deterministic scenario (`/app/frontend/src/data/demoScenario.ts`), works without GPS, network, or backend. Visible badge: `DEMO SCENARIO · SIMULATED TELEMETRY`.
-  - **Live Geo Mode** — `expo-location` foreground permission, requested contextually via "Use Live Geo (GPS)" button. Centres the WorldMap on the user with a 280 m bounding box, follows real heading. On web preview (or if permission denied / unavailable / services off) we surface a `MapErrorState` with `Retry` and `Open Demo Scenario` — the app never blocks.
-- **Modular file layout**:
+This is a focused correction pass on top of Phase 2 (structured world model). No new features were added; nothing was rebuilt from scratch.
+
+### 1. Honest "GPS Position Preview" wording
+- `Use Live Geo (GPS)` → `GPS POSITION PREVIEW · EXPERIMENTAL`.
+- Helper copy: _"Uses live device position with simulated Sentinel world-model overlays. Roads and buildings around your real location are not loaded."_
+- Telemetry source badge in Live mode now reads `GPS POSITION PREVIEW · EXPERIMENTAL` instead of `LIVE GEO · SIMULATED OVERLAYS`.
+- The experimental affordance is rendered as a subordinate row beneath the map (not in the primary status strip) so the judged Demo Scenario path remains the default.
+
+### 2. Selected-hazard preservation
+- Component state changed from `active: Hazard | null` to `activeHazardId: string | null`. The active hazard is **derived** from the latest `worldModel.hazards`.
+- New selection rule: keep the previously-selected id if it still exists; otherwise fall back to high-route-relevance → high-risk → first hazard.
+- Confirm / Report on a non-primary hazard no longer flips the selection back to the primary.
+- Counter updates appear immediately in the card.
+- Selection survives world-model refetches.
+- Backed by 5 frontend unit tests (`frontend/src/__tests__/ghost-vision-selection.test.ts`, runs under Node 20's built-in test runner via `tsx`).
+
+### 3. Idempotent demo-data migration
+- New `SEED_VERSION = 2` constant in `backend/server.py`.
+- `ensure_seed()` is now a true migration:
+  - Reads the applied version from `db.sentinel_meta` (single doc `{id:"seed", version}`).
+  - On mismatch, `replace_one({"id": ...}, doc, upsert=True)` for every known demo hazard (`hz-*`) and vehicle (`v-*`).
+  - **Counters are preserved**: existing `confirmed` and `reportedIncorrect` carry across the migration.
+  - Records the applied version. Subsequent startups are a no-op fast path.
+- Touches **only** `db.hazards`, `db.nearby_vehicles`, and `db.sentinel_meta`. No unrelated collections are modified.
+- Verified by three tests: `test_old_schema_migration`, `test_repeated_seeding_is_idempotent`, `test_seed_meta_records_version`.
+- `GET /api/sentinel/world-model` now has `response_model=WorldModel` so FastAPI validates the response contract.
+
+### 4. Removed false OSM-data claim
+- Map attribution changed from `© OpenStreetMap contributors · Demo derived layout` to `Synthetic GST Road demo scenario`.
+- README/PRD wording clarified: roads, buildings, hazards, and occupied regions are **synthetic geometry placed on real geographic coordinates** — no OSM tiles, vector data, or extracts are loaded at runtime. (The lat/lon centre point lives near GST Road, Tambaram, Chennai for plausibility, nothing more.)
+- Real phone GPS is still used in GPS Position Preview mode — that is explicitly labelled experimental.
+
+### 5. Animation pausing
+- Ghost Vision now reads `useIsFocused()` from `@react-navigation/native`.
+- `WorldMap` accepts a `paused` prop, which threads down to `GhostObjectLayer`. While the screen is unfocused the active-hazard pulse animation is cancelled (`pulse.value = 0`), and `Speech.stop()` is called.
+- Reduced-motion users see no pulse to begin with (animation runs only on the active hazard, ≤ 1 simultaneous transform).
+
+### 6. Local backend validation
+- Tests now default to `http://127.0.0.1:8001`. Override with `SENTINEL_TEST_URL`.
+- Includes a 10-second readiness wait so they cope with backend reload.
+- Run from the repo:
+  ```bash
+  cd backend && python -m pytest tests/test_sentinel.py -v
   ```
-  src/
-    api/sentinel.ts                — typed fetch wrapper with ApiError surfacing
-    types/sentinel.ts              — WorldModel / Hazard / OccupiedRegion (graph-friendly)
-    data/demoScenario.ts           — bundled deterministic scenario
-    hooks/useGhostVisionData.ts    — backend or demo fallback, no silent swallow
-    hooks/useSentinelLocation.ts   — contextual permission, watch, heading
-    components/ghost-vision/
-      WorldMap.tsx                 — projection-driven orchestrator
-      layers.tsx                   — StaticWorld/FieldOfView/OccupiedRegion/Vehicle/Ghost/Ego/Grid
-      projection.ts                — lat/lon → pixel, boundsAround, haversine
-      HazardBottomSheet.tsx        — collapsible detail surface
-      MapLegend.tsx                — symbol legend
-      MapErrorState.tsx            — friendly GPS/backend fallback
-  ```
-- **Backend** updated to camelCase geo schema. New endpoint `GET /api/sentinel/world-model` returns the full scenario. Mongo collections were re-seeded with the new schema.
-- **Honest distance language**: `≈180 m` / "Approximately X metres". No centimetre-level claims.
-- **Animations restrained**: radar sweep removed in favour of subtle hazard pulse on the active hazard only. TTS / animations pause on route blur.
-- **No more `LogBox.ignoreAllLogs`.** SafeAreaProvider added at the root.
-- **Android dev-build ready**: `app.json` configured with package `com.gauth777.sentinel`, scheme `sentinel`, `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION`, `expo-location` plugin with usage description. `eas.json` ships `development` / `preview` / `production` profiles.
+  **Result this pass:** `10 passed in 0.93s`.
 
-## API Surface (FastAPI + MongoDB)
+### 7. Frontend validation
+- `npx tsc --noEmit` → ✅ zero errors.
+- `npx expo lint` → ✅ no issues.
+- Frontend selection tests → ✅ 5 / 5 pass under Node 20 test runner.
+- `npx expo-doctor@latest` → 15 / 18 checks pass. Remaining 3 failures are pre-existing in the template (non-square stock `icon.png` / `adaptive-icon.png` shipped at 512×513, duplicate sub-dependency versions of `@expo/vector-icons` and `@react-navigation/native` pulled in by `expo` and `expo-router`, and three patch-version mismatches on `expo`, `expo-font`, `expo-router`). None were introduced by this phase.
+
+## API surface (unchanged shape, response_model added)
 - `GET /api/sentinel/status`
-- `GET /api/sentinel/world-model` — full structured world
-- `GET /api/sentinel/hazards` — hazards w/ `location {lat,lon}`, polygon, visibilityState, sourceType, routeRelevance
+- `GET /api/sentinel/world-model` — now validated against `WorldModel`
+- `GET /api/sentinel/hazards`
 - `GET /api/sentinel/nearby-vehicles`
-- `POST /api/sentinel/hazards/{id}/confirm` — community validate
+- `POST /api/sentinel/hazards/{id}/confirm`
 - `POST /api/sentinel/hazards/{id}/report-incorrect`
 
-No `_id` leakage; idempotent demo seed; deterministic content matches the bundled frontend scenario so they line up visually.
+## Honest "Real vs Synthetic" matrix
+| Element | Source |
+| --- | --- |
+| Geographic coordinates | Real lat/lon near GST Road, Tambaram (Chennai). Plausibility only. |
+| Road geometry, building footprints, road corridor | **Synthetic, hand-authored.** Not OSM. |
+| Hazards, occupied regions, nearby vehicles | **Simulated.** Deterministic demo data. |
+| Phone GPS | Real (foreground permission via `expo-location`), available only in Android dev build. |
+| OSM tiles / vector data | **Not used.** Reserved for a future native MapLibre adapter (`EXPO_PUBLIC_MAP_STYLE_URL`). |
 
-## Environment Variables
-| Key | Required? | Behaviour when missing |
-| --- | --- | --- |
-| `EXPO_PUBLIC_BACKEND_URL` | Required for live API | UI shows offline banner and falls back to bundled Demo Scenario. App still works. |
-| `EXPO_PUBLIC_MAP_STYLE_URL` | Optional | Reserved for the native MapLibre adapter shipped in the Android dev build. Web preview always renders the SVG WorldMap. |
-| `MONGO_URL`, `DB_NAME` (backend) | Required | Backend will fail to start without them. |
+## Files changed
+- `backend/server.py` — `SEED_VERSION`, migration in `ensure_seed`, `response_model=WorldModel` on world-model.
+- `backend/tests/test_sentinel.py` — default `http://127.0.0.1:8001`, new migration / idempotency / meta-version tests, readiness wait.
+- `frontend/app/ghost-vision.tsx` — `activeHazardId` refactor + derive, GPS Position Preview wording, attribution change, `useIsFocused` → `paused` flow, Speech.stop on blur.
+- `frontend/app.json` — fixed 6-char hex colours.
+- `frontend/src/components/ghost-vision/WorldMap.tsx` — `paused` prop, threaded to ghost layer.
+- `frontend/src/components/ghost-vision/layers.tsx` — `GhostObjectLayer` accepts `paused`, cancels the reanimated repeat when unfocused.
+- `frontend/src/__tests__/ghost-vision-selection.test.ts` — new, 5 tests.
+- `memory/PRD.md` — this document.
 
 ## Running
+
+### Backend (local)
 ```bash
-# Frontend (Expo dev server — preview)
-cd frontend && yarn install && yarn start
-
-# Backend
-cd backend && pip install -r requirements.txt
+cd backend
+pip install -r requirements.txt
 uvicorn server:app --host 0.0.0.0 --port 8001
-
-# Android EAS development build
-cd frontend && npx eas build --profile development --platform android
-# Then install the APK and run: yarn start --dev-client
+# in another shell:
+python -m pytest tests/test_sentinel.py -v
 ```
 
-## Real vs Simulated
-- **Real**: device GPS (expo-location, foreground permission, watch + heading), expo-haptics, expo-speech TTS, expo-router navigation, MongoDB persistence for hazard confirm/report counters.
-- **OSM-derived**: road geometry is taken from real GST Road / Tambaram lat/lon coordinates; OSM attribution displayed.
-- **Mocked / Bundled**: hazards, nearby Sentinel vehicles, occupied regions, building footprints — all deterministic demo data. No real perception pipeline, no real V2V networking.
-- **Not implemented (deferred to next sponsor phase)**: Neo4j AuraDB, Sarvam AI, Render Workflows, Bluetooth dashcam, live object detection, lane detection, real cross-vehicle networking, native MapLibre live tiles (interface point reserved via `EXPO_PUBLIC_MAP_STYLE_URL`).
+### Frontend (Expo dev server)
+```bash
+cd frontend && yarn install && yarn start
+# Selection unit tests
+npx tsx --test src/__tests__/ghost-vision-selection.test.ts
+# Type check + lint + doctor
+npx tsc --noEmit
+npx expo lint
+npx expo-doctor@latest
+```
 
-## Known Limitations
-- The web preview cannot exercise Live Geo Mode — geolocation in sandboxed iframes is unreliable, so `useSentinelLocation` reports `unavailable` and the UI directs the user to Demo Scenario. On an Android dev build, Live Geo works end-to-end.
-- The map background is currently a stylised SVG world (roads + buildings + corridor) — a true tile-server OSM raster will be wired in by the native MapLibre adapter in the dev build.
-- The polygon footprint of a Ghost hazard is approximate (~5×9 m) and not safety-certified.
+### Android development build (for GPS Position Preview)
+```bash
+cd frontend && npx eas build --profile development --platform android
+```
 
-## Validation Results
-- `npx tsc --noEmit` — clean, zero errors.
-- ESLint — zero errors after cleanup.
-- `pytest backend/tests/test_sentinel.py` — 7/7 pass (status, hazards geo schema, nearby vehicles, world-model shape, confirm/report increment, 404).
-- Frontend testing subagent — full UI flow verified on 375×667 viewport; engage-live-geo on web preview correctly surfaces `MapErrorState` with Retry/Use Demo (no crash).
-- Real screenshots captured of Drive HUD, Ghost Vision world map (with FOV cone, building footprints, occupied regions, ghost hazard polygon, distance pill, legend, attribution), and expanded hazard sheet.
+## Confirmation
+- ✅ **Selected-hazard reset bug is fixed.** Confirming or reporting `hz-002` keeps `hz-002` selected and shows its updated counter. Verified by 5 frontend unit tests (`ghost-vision-selection.test.ts`) and by the existing UI flow regression in the test report.
+- ✅ **Old MongoDB seed data is migrated safely.** `SEED_VERSION = 2` plus per-id `replace_one(... upsert=True)` upserts only the known demo documents (`hz-*`, `v-*`); counters preserved; repeated startup is idempotent; unrelated collections are untouched. Verified by `test_old_schema_migration` and `test_repeated_seeding_is_idempotent`.
+
+## Remaining limitations
+- Web preview cannot exercise the experimental GPS Position Preview (sandboxed iframe geolocation is unreliable); the screen falls through to `MapErrorState` with Retry / Use Demo. Works on an Android dev build.
+- Roads/buildings around the user's real GPS coordinates are **not** loaded — the overlays remain synthetic. This is now clearly labelled.
+- Pre-existing template asset issues (non-square `icon.png`/`adaptive-icon.png`) and minor `expo`/`expo-font`/`expo-router` patch-version drift surface in `expo-doctor`; out of scope for this correction pass.
+
+## Out of scope (explicitly not implemented)
+Neo4j AuraDB · Sarvam AI · Render Workflows · Bluetooth dashcam · live object detection / camera depth / lane detection · real V2V networking · native MapLibre dependency · authentication · unrelated screens.
