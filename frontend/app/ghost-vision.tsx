@@ -208,8 +208,10 @@ export default function GhostVisionScreen() {
             {/* Distance label above active hazard (informational; live coords) */}
             {active && (
               <View
-                pointerEvents="none"
-                style={[styles.distancePill, { top: 12, right: 12, borderColor: riskTint(active.risk) }]}
+                style={[
+                  styles.distancePill,
+                  { top: 12, right: 12, borderColor: riskTint(active.risk), pointerEvents: "none" },
+                ]}
                 testID="active-hazard-distance"
               >
                 <MaterialCommunityIcons name="map-marker-distance" size={12} color={riskTint(active.risk)} />
