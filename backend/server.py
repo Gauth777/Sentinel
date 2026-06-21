@@ -1,7 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from contextlib import asynccontextmanager
 import os
 import logging
@@ -9,20 +8,50 @@ import math
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
-
+from pymongo import MongoClient
+from utils.mongo_mock import MOCK_DB_STATE
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ["DB_NAME"]]
+mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+db_name = os.environ.get("DB_NAME", "test_database")
+
+MONGO_REACHABLE = False
+try:
+    check_client = MongoClient(mongo_url, serverSelectionTimeoutMS=1000)
+    check_client.admin.command('ping')
+    MONGO_REACHABLE = True
+    check_client.close()
+except Exception:
+    pass
+
+if MONGO_REACHABLE:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+else:
+    db = MOCK_DB_STATE
+    class DummyClient:
+        def close(self):
+            pass
+    client = DummyClient()
 
 
 # ======================= Models =======================
 class GeoPoint(BaseModel):
     latitude: float
     longitude: float
+
+
+class DemoObservationRequest(BaseModel):
+    id: str
+    type: str
+    label: str
+    location: GeoPoint
+    polygon: Optional[List[GeoPoint]] = None
+    sourceVehicleId: str
+    vehicleLabel: str
 
 
 class SentinelStatus(BaseModel):
@@ -270,6 +299,7 @@ async def ensure_seed() -> None:
     if meta and meta.get("version") == SEED_VERSION:
         return  # already migrated to the current shape
 
+    from services.warning_service import WarningService
     # Migrate hazards: upsert each known demo hazard, keep counters if present.
     for hz in SEED_HAZARDS:
         existing = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0}) or {}
@@ -277,6 +307,12 @@ async def ensure_seed() -> None:
         # Preserve counters from prior records when present.
         merged["confirmed"] = int(existing.get("confirmed", hz.get("confirmed", 0)) or 0)
         merged["reportedIncorrect"] = int(existing.get("reportedIncorrect", hz.get("reportedIncorrect", 0)) or 0)
+        merged["status"] = "active"
+        merged["warnings"] = WarningService.generate_warning_texts(
+            hz["type"],
+            int(hz["distanceMeters"]),
+            hz["recommendedAction"]
+        )
         await db.hazards.replace_one({"id": hz["id"]}, merged, upsert=True)
 
     # Migrate nearby vehicles.
@@ -365,12 +401,31 @@ async def get_world_model():
 
 @api_router.post("/sentinel/hazards/{hazard_id}/confirm", response_model=HazardActionResponse)
 async def confirm_hazard(hazard_id: str):
+    from services.neo4j_service import Neo4jService
+    vehicle_id = "v-ego"
+    await Neo4jService.record_confirmation(vehicle_id, hazard_id)
+    votes = await Neo4jService.get_community_votes(hazard_id)
     res = await db.hazards.find_one_and_update(
         {"id": hazard_id},
-        {"$inc": {"confirmed": 1}},
+        {"$set": {"confirmed": votes["confirmed"], "reportedIncorrect": votes["reportedIncorrect"]}},
         projection={"_id": 0},
         return_document=True,
     )
+    if res:
+        sources_count = res.get("sources", 1)
+        base_confidence = 60 + min(40, (sources_count - 1) * 20)
+        confirmed = res.get("confirmed", 0)
+        reported_incorrect = res.get("reportedIncorrect", 0)
+        confidence = max(0, min(100, int(base_confidence + confirmed * 10 - reported_incorrect * 15)))
+        status = "active"
+        if confidence <= 0 or reported_incorrect >= 5:
+            status = "resolved"
+        res = await db.hazards.find_one_and_update(
+            {"id": hazard_id},
+            {"$set": {"confidence": confidence, "status": status}},
+            projection={"_id": 0},
+            return_document=True,
+        )
     if not res:
         raise HTTPException(status_code=404, detail="Hazard not found")
     return HazardActionResponse(
@@ -380,17 +435,55 @@ async def confirm_hazard(hazard_id: str):
 
 @api_router.post("/sentinel/hazards/{hazard_id}/report-incorrect", response_model=HazardActionResponse)
 async def report_incorrect(hazard_id: str):
+    from services.neo4j_service import Neo4jService
+    vehicle_id = "v-ego"
+    await Neo4jService.record_report_incorrect(vehicle_id, hazard_id)
+    votes = await Neo4jService.get_community_votes(hazard_id)
     res = await db.hazards.find_one_and_update(
         {"id": hazard_id},
-        {"$inc": {"reportedIncorrect": 1}},
+        {"$set": {"confirmed": votes["confirmed"], "reportedIncorrect": votes["reportedIncorrect"]}},
         projection={"_id": 0},
         return_document=True,
     )
+    if res:
+        sources_count = res.get("sources", 1)
+        base_confidence = 60 + min(40, (sources_count - 1) * 20)
+        confirmed = res.get("confirmed", 0)
+        reported_incorrect = res.get("reportedIncorrect", 0)
+        confidence = max(0, min(100, int(base_confidence + confirmed * 10 - reported_incorrect * 15)))
+        status = "active"
+        if confidence <= 0 or reported_incorrect >= 5:
+            status = "resolved"
+        res = await db.hazards.find_one_and_update(
+            {"id": hazard_id},
+            {"$set": {"confidence": confidence, "status": status}},
+            projection={"_id": 0},
+            return_document=True,
+        )
     if not res:
         raise HTTPException(status_code=404, detail="Hazard not found")
     return HazardActionResponse(
         id=res["id"], confirmed=res.get("confirmed", 0), reportedIncorrect=res.get("reportedIncorrect", 0)
     )
+
+
+@api_router.post("/sentinel/demo/observation")
+async def demo_observation(req: DemoObservationRequest):
+    from workflows.hazard_workflow import LocalWorkflowRunner
+    runner = LocalWorkflowRunner()
+    res = await runner.process_observation(req.dict())
+    return res
+
+
+@api_router.post("/sentinel/demo/reset")
+async def demo_reset():
+    from services.neo4j_service import Neo4jService
+    await Neo4jService.reset_demo_data()
+    await db.hazards.delete_many({})
+    await db.observations.delete_many({})
+    await db.sentinel_meta.delete_many({})
+    await ensure_seed()
+    return {"message": "Demo data reset successfully"}
 
 
 app.include_router(api_router)

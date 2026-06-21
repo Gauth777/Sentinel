@@ -24,6 +24,7 @@ import MapLegend from "@/src/components/ghost-vision/MapLegend";
 import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
 import type { Hazard } from "@/src/types/sentinel";
+import { api } from "@/src/api/sentinel";
 
 // process.env.EXPO_PUBLIC_MAP_STYLE_URL is reserved for the native MapLibre adapter
 // that ships in the Android development build. Web preview always uses the SVG WorldMap.
@@ -33,18 +34,19 @@ export default function GhostVisionScreen() {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
 
-  const { worldModel, status, source, loading, error, confirm, report } =
+  const { worldModel, status, source, loading, error, refetch, confirm, report } =
     useGhostVisionData();
   const loc = useSentinelLocation();
   const isFocused = useIsFocused();
 
-  // Store only the id; derive the live hazard from worldModel so confirm/report
-  // counter updates don't reset which hazard the user has selected.
   const [activeHazardId, setActiveHazardId] = useState<string | null>(null);
   const [cardExpanded, setCardExpanded] = useState(false);
   const [muted, setMuted] = useState(false);
   const [actionFlash, setActionFlash] = useState<string | null>(null);
   const spokenForId = useRef<string | null>(null);
+
+  const [selectedLanguage, setSelectedLanguage] = useState<"en" | "hi" | "hinglish">("en");
+  const [role, setRole] = useState<"approaching" | "observer">("approaching");
 
   // Pick the primary hazard the first time the world model loads (and only if
   // nothing is selected yet, or the selected id no longer exists).
@@ -68,16 +70,21 @@ export default function GhostVisionScreen() {
 
   // TTS voice alert (once per hazard, unless muted).
   useEffect(() => {
+    if (!isFocused) {
+      spokenForId.current = null;
+      return;
+    }
     if (!active || muted) return;
     if (spokenForId.current === active.id) return;
     if (active.routeRelevance !== "high" && active.routeRelevance !== "medium") return;
     spokenForId.current = active.id;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-    Speech.speak(
-      `${active.label}. Approximately ${active.distanceMeters} metres ahead. ${active.recommendedAction}.`,
-      { rate: 0.95, pitch: 1.0 }
-    );
-  }, [active, muted]);
+    
+    const text = (active as any).warnings?.[selectedLanguage] || 
+      `${active.label}. Approximately ${active.distanceMeters} metres ahead. ${active.recommendedAction}.`;
+    
+    Speech.speak(text, { rate: 0.95, pitch: 1.0 });
+  }, [active, muted, isFocused, selectedLanguage]);
 
   // Pause animations / TTS when screen loses focus.
   // Pause speech (and animations via the `paused` prop below) whenever the screen
@@ -87,6 +94,52 @@ export default function GhostVisionScreen() {
       Speech.stop();
     }
   }, [isFocused]);
+
+  const onSubmitObservation = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setActionFlash("Observation Submitted");
+    try {
+      const obs = {
+        id: `obs-demo-${Date.now()}`,
+        type: "stationary_vehicle",
+        label: "Stationary Vehicle Ahead",
+        location: {
+          latitude: 12.9452,
+          longitude: 80.1506
+        },
+        polygon: [
+          { latitude: 12.9451, longitude: 80.1505 },
+          { latitude: 12.9451, longitude: 80.1507 },
+          { latitude: 12.9453, longitude: 80.1507 },
+          { latitude: 12.9453, longitude: 80.1505 }
+        ],
+        sourceVehicleId: "v-1",
+        vehicleLabel: "Sentinel-A8"
+      };
+      await api.submitObservation(obs);
+      setTimeout(() => setActionFlash(null), 1800);
+      await refetch();
+    } catch (err: any) {
+      console.error("Failed to submit observation:", err);
+      setActionFlash("Submission Failed");
+      setTimeout(() => setActionFlash(null), 1800);
+    }
+  }, [refetch]);
+
+  const onResetDemo = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setActionFlash("Resetting Demo");
+    try {
+      await api.resetDemo();
+      setTimeout(() => setActionFlash(null), 1800);
+      await refetch();
+      setActiveHazardId(null);
+    } catch (err) {
+      console.error("Failed to reset demo:", err);
+      setActionFlash("Reset Failed");
+      setTimeout(() => setActionFlash(null), 1800);
+    }
+  }, [refetch]);
 
   useFocusEffect(
     useCallback(() => {
@@ -285,6 +338,74 @@ export default function GhostVisionScreen() {
             <MapLegend />
           </View>
 
+          {/* === Two-Vehicle Demo Control Panel === */}
+          <View style={styles.demoPanel} testID="demo-control-panel">
+            <View style={styles.demoPanelHeader}>
+              <MaterialCommunityIcons name="car-multiple" size={16} color={colors.brand} />
+              <Text style={styles.demoPanelTitle}>TWO-VEHICLE DEMO CONTROLS</Text>
+            </View>
+            
+            <View style={styles.roleSwitcher}>
+              <Pressable
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setRole("approaching");
+                }}
+                style={[styles.roleBtn, role === "approaching" && styles.roleBtnActive]}
+                testID="role-approaching-button"
+                android_ripple={{ color: "#003844" }}
+              >
+                <Text style={[styles.roleBtnText, role === "approaching" && styles.roleBtnTextActive]}>
+                  Approaching (Ego)
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setRole("observer");
+                }}
+                style={[styles.roleBtn, role === "observer" && styles.roleBtnActive]}
+                testID="role-observer-button"
+                android_ripple={{ color: "#003844" }}
+              >
+                <Text style={[styles.roleBtnText, role === "observer" && styles.roleBtnTextActive]}>
+                  Observer Vehicle
+                </Text>
+              </Pressable>
+            </View>
+
+            {role === "observer" ? (
+              <View style={styles.observerControls}>
+                <Pressable
+                  onPress={onSubmitObservation}
+                  style={({ pressed }) => [styles.submitObsBtn, pressed && { opacity: 0.85 }]}
+                  testID="submit-observation-button"
+                  android_ripple={{ color: "#000" }}
+                >
+                  <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#000" />
+                  <Text style={styles.submitObsBtnText}>Submit Demo Observation</Text>
+                </Pressable>
+                <Text style={styles.observerHint}>
+                  Observer vehicle Sentinel-A8 observes a hazard and submits it to the graph model.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.approachingHint}>
+                Approaching vehicle queries relevant hazards and shows the observer's hazard as a hidden Ghost object.
+              </Text>
+            )}
+
+            <Pressable
+              onPress={onResetDemo}
+              style={({ pressed }) => [styles.resetDemoBtn, pressed && { opacity: 0.85 }]}
+              testID="reset-demo-button"
+              android_ripple={{ color: "#003844" }}
+            >
+              <MaterialCommunityIcons name="refresh" size={14} color={colors.warning} />
+              <Text style={styles.resetDemoBtnText}>Reset Demo Data</Text>
+            </Pressable>
+          </View>
+
           {/* GPS Position Preview controls (Experimental — hidden from primary demo path). */}
           {!isLiveGeo && (
             <View style={styles.modeRow}>
@@ -359,6 +480,37 @@ export default function GhostVisionScreen() {
             />
           )}
         </ScrollView>
+
+        {/* === Language Selector Row === */}
+        <View style={styles.langSelectorRow} testID="language-selector-row">
+          <Text style={styles.langSelectorLabel}>ALERT LANGUAGE:</Text>
+          <View style={styles.langButtonsGroup}>
+            {(["en", "hi", "hinglish"] as const).map((lang) => (
+              <Pressable
+                key={lang}
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setSelectedLanguage(lang);
+                  spokenForId.current = null; // re-trigger voice with new language
+                }}
+                style={[
+                  styles.langBtn,
+                  selectedLanguage === lang && styles.langBtnActive
+                ]}
+                testID={`lang-button-${lang}`}
+              >
+                <Text
+                  style={[
+                    styles.langBtnText,
+                    selectedLanguage === lang && styles.langBtnTextActive
+                  ]}
+                >
+                  {lang.toUpperCase()}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
 
         {/* === Bottom Action Row === */}
         <View
@@ -715,4 +867,141 @@ const styles = StyleSheet.create({
   actionBtnPrimary: { backgroundColor: colors.brand, borderColor: colors.brand },
   actionBtnActive: { borderColor: colors.warning, backgroundColor: "rgba(210,153,34,0.08)" },
   actionBtnText: { color: colors.onSurface, fontSize: 11, letterSpacing: 1.2, fontWeight: "500" },
+  demoPanel: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: spacing.md,
+  },
+  demoPanelHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  demoPanelTitle: {
+    color: colors.brand,
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 1.2,
+  },
+  roleSwitcher: {
+    flexDirection: "row",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  roleBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    alignItems: "center",
+  },
+  roleBtnActive: {
+    borderColor: colors.brand,
+    backgroundColor: "rgba(0,240,255,0.04)",
+  },
+  roleBtnText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  roleBtnTextActive: {
+    color: colors.brand,
+    fontWeight: "600",
+  },
+  observerControls: {
+    marginTop: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  submitObsBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    backgroundColor: colors.brand,
+    paddingVertical: 12,
+    borderRadius: radius.sm,
+  },
+  submitObsBtnText: {
+    color: "#000",
+    fontWeight: "600",
+    fontSize: 12,
+    letterSpacing: 0.5,
+  },
+  observerHint: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 10,
+    marginTop: 6,
+    lineHeight: 14,
+  },
+  approachingHint: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 10,
+    marginBottom: spacing.sm,
+    lineHeight: 14,
+  },
+  resetDemoBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: colors.warning + "59",
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(210,153,34,0.04)",
+  },
+  resetDemoBtnText: {
+    color: colors.warning,
+    fontSize: 11,
+    fontWeight: "500",
+    letterSpacing: 0.5,
+  },
+  langSelectorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  langSelectorLabel: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 1.2,
+  },
+  langButtonsGroup: {
+    flexDirection: "row",
+    gap: spacing.sm,
+  },
+  langBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  langBtnActive: {
+    backgroundColor: "rgba(0,240,255,0.08)",
+    borderColor: colors.brand,
+  },
+  langBtnText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 1,
+  },
+  langBtnTextActive: {
+    color: colors.brand,
+  },
 });

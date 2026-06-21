@@ -13,6 +13,10 @@ function riskTint(risk: Hazard["risk"]) {
 }
 
 function sourceLabel(h: Hazard): string {
+  const sourcesList = (h as any).source_vehicles;
+  if (sourcesList && sourcesList.length > 0) {
+    return `Shared by: ${sourcesList.join(", ")}`;
+  }
   if (h.sourceType === "shared_vehicle") return "Shared by Sentinel network";
   if (h.sourceType === "local_sensor") return "Local sensor";
   return "Demo data";
@@ -62,9 +66,9 @@ export default function HazardBottomSheet({
             {hazard.label}
           </Text>
           <MaterialCommunityIcons
-            name={expanded ? "chevron-down" : "chevron-up"}
-            size={20}
-            color={colors.onSurfaceSecondary}
+             name={expanded ? "chevron-down" : "chevron-up"}
+             size={20}
+             color={colors.onSurfaceSecondary}
           />
         </View>
         <Text style={styles.visibility}>{visibilityLabel(hazard.visibilityState)}</Text>
@@ -88,6 +92,9 @@ export default function HazardBottomSheet({
           />
           {hazard.confirmed > 0 && (
             <Detail icon="check-all" text={`Confirmed ${hazard.confirmed} time${hazard.confirmed > 1 ? "s" : ""}`} />
+          )}
+          {hazard.reportedIncorrect > 0 && (
+            <Detail icon="alert-outline" text={`Reported incorrect ${hazard.reportedIncorrect} time${hazard.reportedIncorrect > 1 ? "s" : ""}`} />
           )}
         </View>
       )}

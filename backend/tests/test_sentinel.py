@@ -1,51 +1,46 @@
-"""Sentinel backend API tests — phase 3.
-
-Defaults to the LOCAL backend (`http://127.0.0.1:8001`). Set `SENTINEL_TEST_URL`
-to point at a different deployment if you need to test the hosted preview.
-
-Run from the repo root:
-    cd /app/backend
-    pytest tests/test_sentinel.py -v
-"""
 import os
-import time
+import sys
+
+# Ensure backend dir is on path
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+os.environ["DB_NAME"] = "test_sentinel_db"
+
 import pytest
-import requests
-from pymongo import MongoClient
+from fastapi.testclient import TestClient
+from server import app, db, MONGO_REACHABLE, mongo_url
+from utils.mongo_mock import MOCK_SYNC_DB_STATE
+from services.warning_service import WarningService
+from services.neo4j_service import Neo4jService
 
-BASE_URL = os.environ.get("SENTINEL_TEST_URL", "http://127.0.0.1:8001").rstrip("/")
-API = f"{BASE_URL}/api"
-
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "test_database")
-
-
-@pytest.fixture(scope="module")
-def s():
-    sess = requests.Session()
-    sess.headers.update({"Content-Type": "application/json"})
-    # Wait for backend to be ready (up to 10s).
-    for _ in range(20):
-        try:
-            r = sess.get(f"{API}/sentinel/status", timeout=2)
-            if r.status_code == 200:
-                break
-        except requests.RequestException:
-            pass
-        time.sleep(0.5)
-    return sess
-
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 @pytest.fixture(scope="module")
-def mongo():
-    client = MongoClient(MONGO_URL)
-    yield client[DB_NAME]
-    client.close()
+def client():
+    with TestClient(app) as c:
+        c.post("/api/sentinel/demo/reset")
+        yield c
+
+@pytest.fixture(scope="module")
+def sync_db():
+    if MONGO_REACHABLE:
+        from pymongo import MongoClient
+        c = MongoClient(mongo_url)
+        # Drop test DB at start to ensure clean test environment
+        c.drop_database("test_sentinel_db")
+        yield c["test_sentinel_db"]
+        c.close()
+    else:
+        yield MOCK_SYNC_DB_STATE
 
 
 # ===== Status =====
-def test_status(s):
-    r = s.get(f"{API}/sentinel/status", timeout=15)
+def test_status(client):
+    r = client.get("/api/sentinel/status")
     assert r.status_code == 200
     d = r.json()
     assert "_id" not in d
@@ -58,9 +53,9 @@ def test_status(s):
     assert d["sentinel_vehicles_nearby"] == 4
 
 
-# ===== Hazards (new geo schema) =====
-def test_hazards(s):
-    r = s.get(f"{API}/sentinel/hazards", timeout=15)
+# ===== Hazards =====
+def test_hazards(client):
+    r = client.get("/api/sentinel/hazards")
     assert r.status_code == 200
     arr = r.json()
     assert isinstance(arr, list) and len(arr) >= 2
@@ -85,8 +80,8 @@ def test_hazards(s):
 
 
 # ===== Nearby Vehicles =====
-def test_nearby_vehicles(s):
-    r = s.get(f"{API}/sentinel/nearby-vehicles", timeout=15)
+def test_nearby_vehicles(client):
+    r = client.get("/api/sentinel/nearby-vehicles")
     assert r.status_code == 200
     arr = r.json()
     assert len(arr) == 4
@@ -96,9 +91,9 @@ def test_nearby_vehicles(s):
         assert "latitude" in v["location"] and "longitude" in v["location"]
 
 
-# ===== World model (with response_model validation) =====
-def test_world_model(s):
-    r = s.get(f"{API}/sentinel/world-model", timeout=15)
+# ===== World model =====
+def test_world_model(client):
+    r = client.get("/api/sentinel/world-model")
     assert r.status_code == 200
     wm = r.json()
     assert "_id" not in wm
@@ -118,38 +113,40 @@ def test_world_model(s):
 
 
 # ===== Confirm =====
-def test_confirm_increments(s):
-    r1 = s.post(f"{API}/sentinel/hazards/hz-001/confirm", timeout=15)
+def test_confirm_increments(client):
+    client.post("/api/sentinel/demo/reset")
+    r1 = client.post("/api/sentinel/hazards/hz-001/confirm")
     assert r1.status_code == 200
     d1 = r1.json()
     assert "_id" not in d1
     assert d1["id"] == "hz-001"
-    before = d1["confirmed"]
-    r2 = s.post(f"{API}/sentinel/hazards/hz-001/confirm", timeout=15)
+    assert d1["confirmed"] == 1
+    r2 = client.post("/api/sentinel/hazards/hz-001/confirm")
     assert r2.status_code == 200
-    assert r2.json()["confirmed"] == before + 1
+    assert r2.json()["confirmed"] == 1  # idempotent unique vote
 
 
 # ===== Report incorrect =====
-def test_report_increments(s):
-    r1 = s.post(f"{API}/sentinel/hazards/hz-001/report-incorrect", timeout=15)
+def test_report_increments(client):
+    client.post("/api/sentinel/demo/reset")
+    r1 = client.post("/api/sentinel/hazards/hz-001/report-incorrect")
     assert r1.status_code == 200
     d1 = r1.json()
     assert "_id" not in d1
-    before = d1["reportedIncorrect"]
-    r2 = s.post(f"{API}/sentinel/hazards/hz-001/report-incorrect", timeout=15)
+    assert d1["reportedIncorrect"] == 1
+    r2 = client.post("/api/sentinel/hazards/hz-001/report-incorrect")
     assert r2.status_code == 200
-    assert r2.json()["reportedIncorrect"] == before + 1
+    assert r2.json()["reportedIncorrect"] == 1  # idempotent unique vote
 
 
 # ===== 404 =====
-def test_404_unknown(s):
-    r = s.post(f"{API}/sentinel/hazards/does-not-exist/confirm", timeout=15)
+def test_404_unknown(client):
+    r = client.post("/api/sentinel/hazards/does-not-exist/confirm")
     assert r.status_code == 404
 
 
 # ===== Demo seed migration =====
-def test_old_schema_migration(s, mongo):
+def test_old_schema_migration(client, sync_db):
     """Inject a legacy-shape hazard with the same id as a known demo doc, reset
     the seed-version sentinel, then call any endpoint and confirm that the
     record was upserted into the new geo schema."""
@@ -170,12 +167,12 @@ def test_old_schema_migration(s, mongo):
         "confirmed": 5,            # counters must be preserved
         "reportedIncorrect": 2,
     }
-    mongo.hazards.replace_one({"id": "hz-001"}, legacy_hz, upsert=True)
+    sync_db.hazards.replace_one({"id": "hz-001"}, legacy_hz, upsert=True)
     # Force re-migration by clearing the version sentinel.
-    mongo.sentinel_meta.delete_many({"id": "seed"})
+    sync_db.sentinel_meta.delete_many({"id": "seed"})
 
     # Trigger ensure_seed via any endpoint.
-    r = s.get(f"{API}/sentinel/hazards", timeout=15)
+    r = client.get("/api/sentinel/hazards")
     assert r.status_code == 200
     hz = next(h for h in r.json() if h["id"] == "hz-001")
     # Must now be the new schema.
@@ -187,20 +184,114 @@ def test_old_schema_migration(s, mongo):
     assert hz["reportedIncorrect"] >= 2
 
 
-def test_repeated_seeding_is_idempotent(s, mongo):
+def test_repeated_seeding_is_idempotent(client, sync_db):
     """Calling endpoints repeatedly must not produce duplicates."""
-    before = mongo.hazards.count_documents({"id": "hz-001"})
+    before = sync_db.hazards.count_documents({"id": "hz-001"})
     assert before == 1
     for _ in range(5):
-        s.get(f"{API}/sentinel/world-model", timeout=15).raise_for_status()
-    after = mongo.hazards.count_documents({"id": "hz-001"})
+        client.get("/api/sentinel/world-model").raise_for_status()
+    after = sync_db.hazards.count_documents({"id": "hz-001"})
     assert after == 1
-    assert mongo.nearby_vehicles.count_documents({"id": "v-1"}) == 1
+    assert sync_db.nearby_vehicles.count_documents({"id": "v-1"}) == 1
 
 
-def test_seed_meta_records_version(s, mongo):
-    s.get(f"{API}/sentinel/status", timeout=15).raise_for_status()
-    meta = mongo.sentinel_meta.find_one({"id": "seed"})
+def test_seed_meta_records_version(client, sync_db):
+    client.get("/api/sentinel/status").raise_for_status()
+    meta = sync_db.sentinel_meta.find_one({"id": "seed"})
     assert meta is not None
     assert isinstance(meta.get("version"), int)
     assert meta["version"] >= 2
+
+
+# ===== Matching & Observation Processing =====
+def test_new_observation_submission(client, sync_db):
+    # Reset demo data to ensure a clean slate (resets counters)
+    client.post("/api/sentinel/demo/reset")
+    # Post a new observation
+    obs = {
+        "id": "obs-test-new-123",
+        "type": "stationary_vehicle",
+        "label": "Test Stationary Vehicle",
+        "location": {
+            "latitude": 12.9452,
+            "longitude": 80.1506
+        },
+        "polygon": [
+            {"latitude": 12.9451, "longitude": 80.1505},
+            {"latitude": 12.9453, "longitude": 80.1507}
+        ],
+        "sourceVehicleId": "v-1",
+        "vehicleLabel": "Sentinel-A8"
+    }
+    r = client.post("/api/sentinel/demo/observation", json=obs)
+    assert r.status_code == 200
+    hazard = r.json()
+    assert hazard["id"].startswith("hz-")
+    assert hazard["type"] == "stationary_vehicle"
+    assert hazard["confidence"] == 60  # 1 source
+    assert hazard["sources"] == 1
+    
+    # Test idempotency (submit same observation ID)
+    r2 = client.post("/api/sentinel/demo/observation", json=obs)
+    assert r2.status_code == 200
+    hazard2 = r2.json()
+    assert hazard2["id"] == hazard["id"]
+    
+    # Submit matching observation from another vehicle (v-2) within radius (50m)
+    obs_matching = {
+        "id": "obs-test-new-456",
+        "type": "stationary_vehicle",
+        "label": "Test Stationary Vehicle 2",
+        "location": {
+            "latitude": 12.94522,
+            "longitude": 80.1505
+        },
+        "sourceVehicleId": "v-2",
+        "vehicleLabel": "Sentinel-C2"
+    }
+    r3 = client.post("/api/sentinel/demo/observation", json=obs_matching)
+    assert r3.status_code == 200
+    hazard3 = r3.json()
+    assert hazard3["id"] == hazard["id"]  # matched!
+    assert hazard3["sources"] == 2
+    assert hazard3["confidence"] in (79, 80)
+    
+    # Check warnings are generated in English, Hindi, Hinglish
+    assert "warnings" in hazard3
+    assert "en" in hazard3["warnings"]
+    assert "hi" in hazard3["warnings"]
+    assert "hinglish" in hazard3["warnings"]
+
+
+# ===== Warning translations =====
+def test_warning_translation_generation():
+    w = WarningService.generate_warning_texts("stationary_vehicle", 100, "Reduce speed")
+    assert "Stationary vehicle approximately 100 metres ahead. Reduce speed." in w["en"]
+    assert "लगभग 100 मीटर आगे एक रुका हुआ वाहन है। गति कम करें।" in w["hi"]
+    assert "100 metre aage stationary vehicle hai. Speed kam karein." in w["hinglish"]
+
+    w = WarningService.generate_warning_texts("pothole", 50, "Move left")
+    assert "Pothole approximately 50 metres ahead. Move left." in w["en"]
+    assert "लगभग 50 मीटर आगे एक गड्ढा है। बाईं ओर चलें।" in w["hi"]
+    assert "50 metre aage pothole hai. Left move karein." in w["hinglish"]
+
+
+# ===== Neo4j fallback operations =====
+@pytest.mark.anyio
+async def test_neo4j_service_operations(sync_db):
+    # Test Neo4jService directly (calls async methods, which will fall back to MongoDB)
+    await Neo4jService.record_vehicle("v-test-neo", "Test Neo Vehicle")
+    await Neo4jService.record_road_segment("test-segment", "Test segment road")
+    await Neo4jService.record_vehicle_approaching("v-test-neo", "test-segment")
+    await Neo4jService.record_hazard("hz-test-neo", "test-segment", {"type": "pothole", "label": "Pothole"})
+    
+    relevant = await Neo4jService.get_relevant_hazards("v-test-neo")
+    assert "hz-test-neo" in relevant
+
+    # Link mock observation
+    await Neo4jService.record_observation(
+        "obs-neo-1", "v-test-neo", "hz-test-neo", {"type": "pothole", "label": "Pothole"}
+    )
+    provenance = await Neo4jService.get_hazard_provenance("hz-test-neo")
+    assert len(provenance) > 0
+    assert provenance[0]["vehicle_id"] == "v-test-neo"

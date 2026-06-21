@@ -56,6 +56,16 @@ export const api = {
       `/sentinel/hazards/${id}/report-incorrect`,
       { method: "POST" }
     ),
+  submitObservation: (obs: any) =>
+    j<any>(
+      "/sentinel/demo/observation",
+      { method: "POST", body: JSON.stringify(obs) }
+    ),
+  resetDemo: () =>
+    j<any>(
+      "/sentinel/demo/reset",
+      { method: "POST" }
+    ),
 };
 
 // Re-export types for legacy imports

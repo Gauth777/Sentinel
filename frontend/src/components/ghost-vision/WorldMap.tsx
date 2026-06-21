@@ -3,7 +3,7 @@
 
 import React, { useMemo } from "react";
 import { View, StyleSheet } from "react-native";
-import Svg from "react-native-svg";
+import Svg, { Defs, ClipPath, Polygon } from "react-native-svg";
 import { colors } from "@/src/theme";
 import type { GeoPoint, Hazard, WorldModel } from "@/src/types/sentinel";
 import { makeProjector, type Bounds } from "./projection";
@@ -16,6 +16,7 @@ import {
   OccupiedRegionLayer,
   StaticWorldLayer,
   VehicleLayer,
+  pointsString,
 } from "./layers";
 
 type Props = {
@@ -60,6 +61,11 @@ export default function WorldMap({
   return (
     <View style={[styles.wrap, { width, height }]} testID="world-map">
       <Svg width={width} height={height}>
+        <Defs>
+          <ClipPath id="corridor-clip">
+            <Polygon points={pointsString(worldModel.roadCorridor, proj)} />
+          </ClipPath>
+        </Defs>
         <MapBackground width={width} height={height} />
         <GridLayer width={width} height={height} />
         <StaticWorldLayer worldModel={worldModel} proj={proj} />
@@ -68,6 +74,7 @@ export default function WorldMap({
           headingDeg={ego.headingDegrees}
           width={width}
           height={height}
+          clipPath="url(#corridor-clip)"
         />
         <OccupiedRegionLayer regions={worldModel.occupiedRegions} proj={proj} />
         <VehicleLayer vehicles={worldModel.nearbyVehicles} proj={proj} />

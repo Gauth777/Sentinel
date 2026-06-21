@@ -30,7 +30,7 @@ import type { Projector } from "./projection";
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
-function pointsString(points: GeoPoint[], proj: Projector): string {
+export function pointsString(points: GeoPoint[], proj: Projector): string {
   return points
     .map((p) => {
       const { x, y } = proj.project(p);
@@ -114,11 +114,13 @@ export function FieldOfViewLayer({
   headingDeg,
   width,
   height,
+  clipPath,
 }: {
   egoPx: { x: number; y: number };
   headingDeg: number;
   width: number;
   height: number;
+  clipPath?: string;
 }) {
   // Build a triangular cone pointing along headingDeg (0 = north on screen).
   const rangePx = Math.max(width, height) * 0.65;
@@ -143,6 +145,7 @@ export function FieldOfViewLayer({
       stroke={colors.brand}
       strokeWidth={0.5}
       strokeOpacity={0.25}
+      clipPath={clipPath}
     />
   );
 }
