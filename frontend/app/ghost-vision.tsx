@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -13,92 +13,193 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
-import { useRouter } from "expo-router";
-import Animated, { FadeIn, FadeInDown } from "react-native-reanimated";
+import { useRouter, useFocusEffect } from "expo-router";
+import { useIsFocused } from "@react-navigation/native";
 import { colors, spacing, radius, fonts } from "@/src/theme";
-import { api, type SentinelStatus, type Hazard, type NearbyVehicle } from "@/src/api/sentinel";
-import TacticalMap from "@/src/components/TacticalMap";
+import { useGhostVisionData } from "@/src/hooks/useGhostVisionData";
+import { useSentinelLocation } from "@/src/hooks/useSentinelLocation";
+import WorldMap from "@/src/components/ghost-vision/WorldMap";
+import HazardBottomSheet from "@/src/components/ghost-vision/HazardBottomSheet";
+import MapLegend from "@/src/components/ghost-vision/MapLegend";
+import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
+import { boundsAround } from "@/src/components/ghost-vision/projection";
+import type { Hazard } from "@/src/types/sentinel";
+import { api } from "@/src/api/sentinel";
+import { buildLiveObservation } from "@/src/utils/ghostVisionLive";
+
+// process.env.EXPO_PUBLIC_MAP_STYLE_URL is reserved for the native MapLibre adapter
+// that ships in the Android development build. Web preview always uses the SVG WorldMap.
 
 export default function GhostVisionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
 
-  const [status, setStatus] = useState<SentinelStatus | null>(null);
-  const [hazards, setHazards] = useState<Hazard[]>([]);
-  const [vehicles, setVehicles] = useState<NearbyVehicle[]>([]);
-  const [active, setActive] = useState<Hazard | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [muted, setMuted] = useState(false);
-  const spokenRef = useRef(false);
-  const [actionFlash, setActionFlash] = useState<string | null>(null);
+  const loc = useSentinelLocation();
+  const { worldModel, status, source, loading, error, refetch, confirm, report } =
+    useGhostVisionData({
+      enabled: loc.mode === "live",
+      location: loc.location,
+      headingDegrees: loc.headingDegrees,
+    });
+  const isFocused = useIsFocused();
 
-  // tactical map dimensions
-  const mapH = Math.round(width * 1.15);
+  const [activeHazardId, setActiveHazardId] = useState<string | null>(null);
+  const [cardExpanded, setCardExpanded] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [actionFlash, setActionFlash] = useState<string | null>(null);
+  const spokenForId = useRef<string | null>(null);
+  const actionFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [selectedLanguage, setSelectedLanguage] = useState<"en" | "hi" | "hinglish">("en");
+  const [role, setRole] = useState<"approaching" | "observer">("approaching");
+
+  const showActionFlash = useCallback((message: string | null, durationMs?: number) => {
+    if (actionFlashTimer.current) {
+      clearTimeout(actionFlashTimer.current);
+      actionFlashTimer.current = null;
+    }
+    setActionFlash(message);
+    if (message && durationMs) {
+      actionFlashTimer.current = setTimeout(() => {
+        setActionFlash(null);
+        actionFlashTimer.current = null;
+      }, durationMs);
+    }
+  }, []);
 
   useEffect(() => {
-    let alive = true;
-    Promise.all([api.status(), api.hazards(), api.nearby()])
-      .then(([s, h, v]) => {
-        if (!alive) return;
-        setStatus(s);
-        setHazards(h);
-        setVehicles(v);
-        // primary hazard = highest risk closest
-        const primary =
-          h.find((x) => x.risk === "high") ?? h[0] ?? null;
-        setActive(primary);
-      })
-      .catch(() => {})
-      .finally(() => alive && setLoading(false));
     return () => {
-      alive = false;
-      Speech.stop();
+      if (actionFlashTimer.current) {
+        clearTimeout(actionFlashTimer.current);
+      }
     };
   }, []);
 
-  // TTS voice alert (once per active hazard, unless muted)
+  // Pick the primary hazard the first time the world model loads (and only if
+  // nothing is selected yet, or the selected id no longer exists).
   useEffect(() => {
-    if (!active || muted || spokenRef.current) return;
-    spokenRef.current = true;
+    if (!worldModel) return;
+    setActiveHazardId((prev) => {
+      if (prev && worldModel.hazards.some((h) => h.id === prev)) return prev;
+      const primary =
+        worldModel.hazards.find((h) => h.routeRelevance === "high") ??
+        worldModel.hazards.find((h) => h.risk === "high") ??
+        worldModel.hazards[0] ??
+        null;
+      return primary ? primary.id : null;
+    });
+  }, [worldModel]);
+
+  const active: Hazard | null = useMemo(() => {
+    if (!worldModel || !activeHazardId) return null;
+    return worldModel.hazards.find((h) => h.id === activeHazardId) ?? null;
+  }, [worldModel, activeHazardId]);
+
+  // TTS voice alert (once per hazard, unless muted).
+  useEffect(() => {
+    if (!isFocused) {
+      spokenForId.current = null;
+      return;
+    }
+    if (!active || muted) return;
+    if (spokenForId.current === active.id) return;
+    if (active.routeRelevance !== "high" && active.routeRelevance !== "medium") return;
+    spokenForId.current = active.id;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-    Speech.speak(
-      `${active.label}. ${active.distance_m} metres ahead. ${active.recommended_action}.`,
-      { rate: 0.95, pitch: 1.0 }
-    );
-  }, [active, muted]);
+    
+    const text = (active as any).warnings?.[selectedLanguage] || 
+      `${active.label}. Approximately ${active.distanceMeters} metres ahead. ${active.recommendedAction}.`;
+    
+    Speech.speak(text, { rate: 0.95, pitch: 1.0 });
+  }, [active, muted, isFocused, selectedLanguage]);
+
+  // Pause animations / TTS when screen loses focus.
+  // Pause speech (and animations via the `paused` prop below) whenever the screen
+  // loses focus. This is the single source of truth for animation pausing.
+  useEffect(() => {
+    if (!isFocused) {
+      Speech.stop();
+    }
+  }, [isFocused]);
+
+  const onSubmitObservation = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    showActionFlash("Sharing observation…");
+    try {
+      const obs =
+        loc.mode === "live" && loc.location
+          ? buildLiveObservation({
+              location: loc.location,
+              headingDegrees: loc.headingDegrees,
+            })
+          : {
+              id: "obs-demo-stationary-001",
+              type: "stationary_vehicle",
+              label: "Stationary Vehicle Ahead",
+              location: {
+                latitude: 12.9452,
+                longitude: 80.1506
+              },
+              polygon: [
+                { latitude: 12.9451, longitude: 80.1505 },
+                { latitude: 12.9451, longitude: 80.1507 },
+                { latitude: 12.9453, longitude: 80.1507 },
+                { latitude: 12.9453, longitude: 80.1505 }
+              ],
+              sourceVehicleId: "v-1",
+              vehicleLabel: "Sentinel-A8"
+            };
+      await api.submitObservation(obs);
+      await refetch(true);
+
+      showActionFlash(
+        loc.mode === "live"
+          ? "Live hazard shared with approaching vehicles"
+          : "Observation shared with approaching vehicles",
+        2200
+      );
+    } catch (err: any) {
+      console.error("Failed to submit observation:", err);
+      showActionFlash("Submission Failed", 1800);
+    }
+  }, [loc.headingDegrees, loc.location, loc.mode, refetch, showActionFlash]);
+
+  const onResetDemo = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    showActionFlash("Resetting Demo");
+    try {
+      await api.resetDemo();
+      showActionFlash("Demo reset", 1800);
+      await refetch(true);
+      setActiveHazardId(null);
+    } catch (err) {
+      console.error("Failed to reset demo:", err);
+      showActionFlash("Reset Failed", 1800);
+    }
+  }, [refetch, showActionFlash]);
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        Speech.stop();
+      };
+    }, [])
+  );
 
   const onConfirm = useCallback(async () => {
     if (!active) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Hazard confirmed");
-    try {
-      const r = await api.confirm(active.id);
-      setHazards((prev) =>
-        prev.map((h) => (h.id === r.id ? { ...h, confirmed: r.confirmed } : h))
-      );
-      setActive((a) => (a ? { ...a, confirmed: r.confirmed } : a));
-    } catch {}
-    setTimeout(() => setActionFlash(null), 1800);
-  }, [active]);
+    showActionFlash("Hazard confirmed", 1800);
+    await confirm(active.id);
+  }, [active, confirm, showActionFlash]);
 
   const onReport = useCallback(async () => {
     if (!active) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Report submitted");
-    try {
-      const r = await api.report(active.id);
-      setHazards((prev) =>
-        prev.map((h) =>
-          h.id === r.id ? { ...h, reported_incorrect: r.reported_incorrect } : h
-        )
-      );
-      setActive((a) =>
-        a ? { ...a, reported_incorrect: r.reported_incorrect } : a
-      );
-    } catch {}
-    setTimeout(() => setActionFlash(null), 1800);
-  }, [active]);
+    showActionFlash("Report submitted", 1800);
+    await report(active.id);
+  }, [active, report, showActionFlash]);
 
   const onMute = useCallback(() => {
     Haptics.selectionAsync().catch(() => {});
@@ -115,7 +216,40 @@ export default function GhostVisionScreen() {
     router.back();
   }, [router]);
 
-  if (loading) {
+  const onEngageLiveGeo = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+    loc.request();
+  }, [loc]);
+
+  const onUseDemoMode = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+    loc.switchToDemo();
+  }, [loc]);
+
+  const boundsOverride = useMemo(
+    () => (loc.mode === "live" && loc.location ? boundsAround(loc.location, 280) : undefined),
+    [loc.mode, loc.location]
+  );
+
+  const egoOverride = useMemo(() => {
+  if (loc.mode !== "live" || !loc.location) {
+    return undefined;
+  }
+
+  return {
+    location: loc.location,
+    headingDegrees:
+      typeof loc.headingDegrees === "number"
+        ? loc.headingDegrees
+        : 0,
+  };
+  }, [
+    loc.mode,
+    loc.location,
+    loc.headingDegrees,
+  ]);
+
+  if (loading || !worldModel) {
     return (
       <View style={[styles.root, styles.center]} testID="ghost-vision-loading">
         <ActivityIndicator color={colors.brand} />
@@ -124,12 +258,13 @@ export default function GhostVisionScreen() {
     );
   }
 
-  const riskColor =
-    active?.risk === "high"
-      ? colors.error
-      : active?.risk === "medium"
-      ? colors.warning
-      : colors.success;
+  const mapH = Math.round(width * 1.05);
+  const isLiveGeo = loc.mode === "live";
+  const displayedSpeedKmh = isLiveGeo
+  ? Math.round(loc.speedKmh)
+  : status?.speed_kmh ?? worldModel.ego.speedKmh;
+  const showLiveError =
+    loc.mode === "denied" || loc.mode === "unavailable" || loc.mode === "requesting";
 
   return (
     <View style={styles.root} testID="ghost-vision-screen">
@@ -146,8 +281,8 @@ export default function GhostVisionScreen() {
             />
             <StatusChip
               icon="crosshairs-gps"
-              ok={!!status?.gps_locked}
-              label={status?.gps_locked ? "GPS" : "NO GPS"}
+              ok={isLiveGeo || !!status?.gps_locked}
+              label={isLiveGeo ? "GPS LIVE" : status?.gps_locked ? "GPS" : "NO GPS"}
               testID="gps-status-chip"
             />
             <StatusChip
@@ -158,143 +293,272 @@ export default function GhostVisionScreen() {
             />
           </View>
           <View style={styles.speedBlock} testID="top-speed">
-            <Text style={styles.speedTopNum}>{status?.speed_kmh ?? 0}</Text>
+            <Text style={styles.speedTopNum}>{displayedSpeedKmh}</Text>
             <Text style={styles.speedTopUnit}>km/h</Text>
           </View>
         </View>
 
         <View style={styles.roadRow}>
           <MaterialCommunityIcons name="road-variant" size={14} color={colors.onSurfaceSecondary} />
-          <Text style={styles.roadText}>{status?.road_name}</Text>
-          <View style={styles.headingBadge}>
-            <MaterialCommunityIcons name="navigation" size={11} color={colors.brand} />
-            <Text style={styles.headingText}>{status?.heading}</Text>
-          </View>
+          <Text style={styles.roadText} numberOfLines={1}>
+            {status?.road_name ?? worldModel.roads[0]?.name ?? "—"}
+          </Text>
+          <ModeBadge source={source} isLiveGeo={isLiveGeo} telemetry={worldModel.telemetrySource} />
         </View>
 
-        {/* === Tactical Map === */}
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: spacing.lg }}
+          contentContainerStyle={{ paddingBottom: spacing.md }}
           showsVerticalScrollIndicator={false}
         >
+          {/* === World Map === */}
           <View style={[styles.mapWrap, { height: mapH }]} testID="ghost-vision-map">
-            <TacticalMap
+            <WorldMap
               width={width}
               height={mapH}
-              hazards={hazards}
-              vehicles={vehicles}
+              worldModel={worldModel}
+              egoOverride={egoOverride}
+              boundsOverride={boundsOverride}
               activeHazardId={active?.id}
+              paused={!isFocused}
               onHazardPress={(h) => {
                 Haptics.selectionAsync().catch(() => {});
-                setActive(h);
-                spokenRef.current = false;
+                setActiveHazardId(h.id);
+                spokenForId.current = null; // allow voice for the new active
               }}
             />
 
-            {/* Distance label pill for active hazard */}
+            {/* Distance label above active hazard (informational; live coords) */}
             {active && (
-              <Animated.View
-                entering={FadeIn.duration(300)}
+              <View
                 style={[
                   styles.distancePill,
-                  {
-                    left: active.x * width - 40,
-                    top: active.y * mapH - 56,
-                    borderColor: riskColor,
-                  },
+                  { top: 12, right: 12, borderColor: riskTint(active.risk), pointerEvents: "none" },
                 ]}
                 testID="active-hazard-distance"
-                pointerEvents="none"
               >
-                <Text style={[styles.distanceNum, { color: riskColor }]}>
-                  {active.distance_m}
-                </Text>
+                <MaterialCommunityIcons name="map-marker-distance" size={12} color={riskTint(active.risk)} />
+                <Text style={[styles.distanceNum, { color: riskTint(active.risk) }]}>≈{active.distanceMeters}</Text>
                 <Text style={styles.distanceUnit}>m</Text>
-              </Animated.View>
+              </View>
             )}
-
-            {/* Compass marker */}
-            <View style={styles.compass}>
-              <MaterialCommunityIcons name="navigation" size={16} color={colors.brand} />
-              <Text style={styles.compassLabel}>N</Text>
-            </View>
 
             {/* Action flash */}
             {actionFlash && (
-              <Animated.View
-                entering={FadeIn.duration(180)}
-                style={styles.actionFlash}
-                testID="action-flash"
-              >
+              <View style={styles.actionFlash} testID="action-flash">
                 <MaterialCommunityIcons name="check-circle" size={16} color={colors.brand} />
                 <Text style={styles.actionFlashText}>{actionFlash}</Text>
-              </Animated.View>
+              </View>
             )}
+
+            {/* Telemetry source pill (TOP LEFT) */}
+            <View
+              style={[
+                styles.scenarioBadge,
+                isLiveGeo
+                  ? { borderColor: colors.success }
+                  : { borderColor: colors.warning },
+              ]}
+              testID="telemetry-source-badge"
+            >
+              <MaterialCommunityIcons
+                name={isLiveGeo ? "satellite-variant" : "test-tube"}
+                size={11}
+                color={isLiveGeo ? colors.success : colors.warning}
+              />
+              <Text
+                style={[
+                  styles.scenarioBadgeText,
+                  { color: isLiveGeo ? colors.success : colors.warning },
+                ]}
+              >
+                {isLiveGeo
+                  ? "LIVE GPS · SHARED HAZARD LAYER"
+                  : "DEMO SCENARIO · SIMULATED TELEMETRY"}
+              </Text>
+            </View>
+
+            {/* Attribution */}
+            <Text style={styles.attribution} testID="map-attribution">
+              Synthetic Sentinel context; not real map data
+            </Text>
+
+            <MapLegend />
           </View>
 
-          {/* === Hazard Info Card === */}
-          {active && (
-            <Animated.View
-              entering={FadeInDown.duration(350)}
-              style={styles.card}
-              testID="hazard-info-card"
+          {/* === Two-Vehicle Demo Control Panel === */}
+          <View style={styles.demoPanel} testID="demo-control-panel">
+            <View style={styles.demoPanelHeader}>
+              <MaterialCommunityIcons name="car-multiple" size={16} color={colors.brand} />
+              <Text style={styles.demoPanelTitle}>TWO-VEHICLE DEMO CONTROLS</Text>
+            </View>
+            
+            <View style={styles.roleSwitcher}>
+              <Pressable
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setRole("approaching");
+                }}
+                style={[styles.roleBtn, role === "approaching" && styles.roleBtnActive]}
+                testID="role-approaching-button"
+                android_ripple={{ color: "#003844" }}
+              >
+                <Text style={[styles.roleBtnText, role === "approaching" && styles.roleBtnTextActive]}>
+                  Approaching (Ego)
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setRole("observer");
+                }}
+                style={[styles.roleBtn, role === "observer" && styles.roleBtnActive]}
+                testID="role-observer-button"
+                android_ripple={{ color: "#003844" }}
+              >
+                <Text style={[styles.roleBtnText, role === "observer" && styles.roleBtnTextActive]}>
+                  Observer Vehicle
+                </Text>
+              </Pressable>
+            </View>
+
+            {role === "observer" ? (
+              <View style={styles.observerControls}>
+                <Pressable
+                  onPress={onSubmitObservation}
+                  style={({ pressed }) => [styles.submitObsBtn, pressed && { opacity: 0.85 }]}
+                  testID="submit-observation-button"
+                  android_ripple={{ color: "#000" }}
+                >
+                  <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#000" />
+                  <Text style={styles.submitObsBtnText}>Submit Demo Observation</Text>
+                </Pressable>
+                <Text style={styles.observerHint}>
+                  Observer vehicle Sentinel-A8 observes a hazard and submits it to the graph model.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.approachingHint}>
+                Approaching vehicle queries relevant hazards and shows the observer hazard as a hidden Ghost object.
+              </Text>
+            )}
+
+            <Pressable
+              onPress={onResetDemo}
+              style={({ pressed }) => [styles.resetDemoBtn, pressed && { opacity: 0.85 }]}
+              testID="reset-demo-button"
+              android_ripple={{ color: "#003844" }}
             >
-              <View style={styles.cardHeader}>
-                <View style={[styles.riskTag, { borderColor: riskColor }]}>
-                  <View style={[styles.riskDot, { backgroundColor: riskColor }]} />
-                  <Text style={[styles.riskTagText, { color: riskColor }]}>
-                    {active.risk.toUpperCase()} RISK
+              <MaterialCommunityIcons name="refresh" size={14} color={colors.warning} />
+              <Text style={styles.resetDemoBtnText}>Reset Demo Data</Text>
+            </Pressable>
+          </View>
+
+          {/* GPS Position Preview controls (Experimental — hidden from primary demo path). */}
+          {!isLiveGeo && (
+            <View style={styles.modeRow}>
+              <Pressable
+                onPress={onEngageLiveGeo}
+                style={({ pressed }) => [styles.modeBtn, pressed && { opacity: 0.85 }]}
+                testID="engage-live-geo-button"
+                android_ripple={{ color: "#003844" }}
+              >
+                <MaterialCommunityIcons name="map-marker-radius" size={16} color={colors.brand} />
+                <View style={{ flex: 1 }}>
+                  <View style={styles.modeBtnTitleRow}>
+                    <Text style={styles.modeBtnText}>
+                      {loc.mode === "requesting"
+                        ? "REQUESTING GPS…"
+                        : "LIVE GPS"}
+                    </Text>
+                    <Text style={styles.experimentalTag}>EXPERIMENTAL</Text>
+                  </View>
+                  <Text style={styles.modeBtnHint}>
+                    Uses live device position with a shared hazard layer and synthetic Sentinel context.
                   </Text>
                 </View>
-                <Text style={styles.cardAge}>{active.observed_seconds_ago}s ago</Text>
-              </View>
+              </Pressable>
+              {loc.mode !== "idle" && loc.mode !== "requesting" && (
+                <Pressable
+                  onPress={onUseDemoMode}
+                  style={({ pressed }) => [styles.modeBtnGhost, pressed && { opacity: 0.85 }]}
+                  testID="use-demo-mode-button"
+                >
+                  <Text style={styles.modeBtnGhostText}>Use Demo Scenario</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
 
-              <View style={styles.cardTitleRow}>
-                <MaterialCommunityIcons
-                  name="car-brake-alert"
-                  size={26}
-                  color={riskColor}
-                />
-                <Text style={styles.cardTitle} testID="hazard-title">
-                  {active.label}
-                </Text>
-              </View>
+          {/* Map error / fallback panel */}
+          {showLiveError && loc.error && (
+            <MapErrorState
+              title={
+                loc.mode === "denied"
+                  ? "Location permission denied"
+                  : loc.mode === "requesting"
+                  ? "Acquiring GPS…"
+                  : "Live GPS unavailable"
+              }
+              message={loc.error}
+              onRetry={() => loc.request()}
+              onUseDemo={() => loc.switchToDemo()}
+            />
+          )}
 
-              <View style={styles.metricsRow}>
-                <Metric label="DISTANCE" value={`${active.distance_m}`} unit="m" big />
-                <View style={styles.vline} />
-                <Metric
-                  label="CONFIDENCE"
-                  value={`${active.confidence}`}
-                  unit="%"
-                  big
-                />
-                <View style={styles.vline} />
-                <Metric label="SOURCES" value={`${active.sources}`} unit="veh" big />
-              </View>
+          {/* Backend offline notice (non-blocking) */}
+          {error && source === "demo" && (
+            <View style={styles.banner} testID="offline-banner">
+              <MaterialCommunityIcons name="cloud-off-outline" size={14} color={colors.warning} />
+              <Text style={styles.bannerText}>
+                Backend unreachable — using bundled demo data
+              </Text>
+            </View>
+          )}
 
-              <View style={styles.detailRow}>
-                <MaterialCommunityIcons name="arrow-up-bold" size={14} color={colors.onSurfaceSecondary} />
-                <Text style={styles.detailText}>{active.direction}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <MaterialCommunityIcons name="account-multiple-check" size={14} color={colors.onSurfaceSecondary} />
-                <Text style={styles.detailText}>
-                  Reported by {active.sources} Sentinel vehicle{active.sources > 1 ? "s" : ""}
-                  {active.confirmed > 0 ? ` · ${active.confirmed} confirms` : ""}
-                </Text>
-              </View>
-
-              <View style={styles.actionAdvice} testID="recommended-action">
-                <MaterialCommunityIcons name="alert-decagram" size={16} color={riskColor} />
-                <Text style={[styles.actionAdviceText, { color: riskColor }]}>
-                  RECOMMENDED · {active.recommended_action.toUpperCase()}
-                </Text>
-              </View>
-            </Animated.View>
+          {/* === Hazard Bottom Sheet === */}
+          {active && (
+            <HazardBottomSheet
+              hazard={active}
+              expanded={cardExpanded}
+              onToggle={() => {
+                Haptics.selectionAsync().catch(() => {});
+                setCardExpanded((e) => !e);
+              }}
+            />
           )}
         </ScrollView>
+
+        {/* === Language Selector Row === */}
+        <View style={styles.langSelectorRow} testID="language-selector-row">
+          <Text style={styles.langSelectorLabel}>ALERT LANGUAGE:</Text>
+          <View style={styles.langButtonsGroup}>
+            {(["en", "hi", "hinglish"] as const).map((lang) => (
+              <Pressable
+                key={lang}
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  setSelectedLanguage(lang);
+                  spokenForId.current = null; // re-trigger voice with new language
+                }}
+                style={[
+                  styles.langBtn,
+                  selectedLanguage === lang && styles.langBtnActive
+                ]}
+                testID={`lang-button-${lang}`}
+              >
+                <Text
+                  style={[
+                    styles.langBtnText,
+                    selectedLanguage === lang && styles.langBtnTextActive
+                  ]}
+                >
+                  {lang.toUpperCase()}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
 
         {/* === Bottom Action Row === */}
         <View
@@ -304,12 +568,7 @@ export default function GhostVisionScreen() {
           ]}
           testID="bottom-action-row"
         >
-          <ActionButton
-            icon="steering"
-            label="Drive View"
-            onPress={onReturn}
-            testID="return-to-drive-button"
-          />
+          <ActionButton icon="steering" label="Drive View" onPress={onReturn} testID="return-to-drive-button" />
           <ActionButton
             icon="check-circle-outline"
             label="Confirm"
@@ -326,14 +585,18 @@ export default function GhostVisionScreen() {
           <ActionButton
             icon={muted ? "volume-off" : "volume-high"}
             label={muted ? "Muted" : "Voice"}
-            onPress={onMute}
             active={muted}
+            onPress={onMute}
             testID="mute-voice-button"
           />
         </View>
       </SafeAreaView>
     </View>
   );
+}
+
+function riskTint(risk: Hazard["risk"]) {
+  return risk === "high" ? colors.error : risk === "medium" ? colors.warning : colors.success;
 }
 
 function StatusChip({
@@ -349,36 +612,44 @@ function StatusChip({
 }) {
   return (
     <View style={styles.chip} testID={testID}>
-      <MaterialCommunityIcons
-        name={icon}
-        size={12}
-        color={ok ? colors.brand : colors.error}
-      />
+      <MaterialCommunityIcons name={icon} size={12} color={ok ? colors.brand : colors.error} />
       <Text style={[styles.chipText, !ok && { color: colors.error }]}>{label}</Text>
     </View>
   );
 }
 
-function Metric({
-  label,
-  value,
-  unit,
-  big,
+function ModeBadge({
+  source,
+  isLiveGeo,
+  telemetry,
 }: {
-  label: string;
-  value: string;
-  unit?: string;
-  big?: boolean;
+  source: "backend" | "demo";
+  isLiveGeo: boolean;
+  telemetry: string;
 }) {
+  const isLive = isLiveGeo;
   return (
-    <View style={styles.metric}>
-      <Text style={styles.metricLabel}>{label}</Text>
-      <View style={{ flexDirection: "row", alignItems: "flex-end" }}>
-        <Text style={[styles.metricValue, big && { fontSize: fonts.size.xxl }]}>
-          {value}
-        </Text>
-        {unit && <Text style={styles.metricUnit}>{unit}</Text>}
-      </View>
+    <View
+      style={[
+        styles.modeBadge,
+        { borderColor: isLive ? colors.success : colors.warning },
+      ]}
+      testID="mode-badge"
+    >
+      <View
+        style={[
+          styles.modeBadgeDot,
+          { backgroundColor: isLive ? colors.success : colors.warning },
+        ]}
+      />
+      <Text
+        style={[
+          styles.modeBadgeText,
+          { color: isLive ? colors.success : colors.warning },
+        ]}
+      >
+        {isLive ? "LIVE GPS" : telemetry === "demo" ? "DEMO" : source === "backend" ? "CACHED" : "DEMO"}
+      </Text>
     </View>
   );
 }
@@ -437,8 +708,6 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     fontSize: fonts.size.sm,
   },
-
-  // Top strip
   topStrip: {
     flexDirection: "row",
     alignItems: "center",
@@ -458,12 +727,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  chipText: {
-    color: colors.onSurface,
-    fontSize: 10,
-    letterSpacing: 1.4,
-    fontWeight: "500",
-  },
+  chipText: { color: colors.onSurface, fontSize: 10, letterSpacing: 1.4, fontWeight: "500" },
   speedBlock: { flexDirection: "row", alignItems: "flex-end" },
   speedTopNum: {
     color: colors.onSurface,
@@ -479,7 +743,6 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     letterSpacing: 1,
   },
-
   roadRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -488,20 +751,18 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
   roadText: { color: colors.onSurfaceSecondary, fontSize: fonts.size.sm, flex: 1 },
-  headingBadge: {
+  modeBadge: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 2,
+    gap: 4,
     backgroundColor: colors.surfaceSecondary,
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: colors.border,
   },
-  headingText: { color: colors.brand, fontSize: 10, letterSpacing: 1.2, fontWeight: "500" },
-
-  // Map
+  modeBadgeDot: { width: 6, height: 6, borderRadius: 3 },
+  modeBadgeText: { fontSize: 10, letterSpacing: 1.4, fontWeight: "500" },
   mapWrap: {
     width: "100%",
     overflow: "hidden",
@@ -513,45 +774,19 @@ const styles = StyleSheet.create({
   distancePill: {
     position: "absolute",
     paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
+    paddingVertical: 4,
     borderRadius: radius.sm,
     backgroundColor: "rgba(9,10,12,0.92)",
     borderWidth: 1,
     flexDirection: "row",
     alignItems: "flex-end",
-    minWidth: 72,
-    justifyContent: "center",
-  },
-  distanceNum: { fontSize: fonts.size.lg, fontWeight: "500", letterSpacing: 0.5 },
-  distanceUnit: {
-    color: colors.onSurfaceSecondary,
-    fontSize: 10,
-    marginLeft: 2,
-    marginBottom: 3,
-  },
-  compass: {
-    position: "absolute",
-    top: spacing.md,
-    right: spacing.md,
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    flexDirection: "row",
-    alignItems: "center",
     gap: 4,
   },
-  compassLabel: {
-    color: colors.brand,
-    fontSize: 10,
-    letterSpacing: 1.2,
-    fontWeight: "500",
-  },
+  distanceNum: { fontSize: fonts.size.lg, fontWeight: "500", letterSpacing: 0.5 },
+  distanceUnit: { color: colors.onSurfaceSecondary, fontSize: 10, marginBottom: 2 },
   actionFlash: {
     position: "absolute",
-    top: spacing.md,
+    top: 60,
     left: spacing.md,
     flexDirection: "row",
     alignItems: "center",
@@ -569,108 +804,93 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     fontWeight: "500",
   },
-
-  // Card
-  card: {
-    marginHorizontal: spacing.lg,
-    marginTop: spacing.lg,
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    padding: spacing.lg,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  riskTag: {
+  scenarioBadge: {
+    position: "absolute",
+    top: spacing.md,
+    left: spacing.md,
     flexDirection: "row",
     alignItems: "center",
-    gap: spacing.sm,
-    borderWidth: 1,
-    borderRadius: radius.sm,
+    gap: 6,
+    backgroundColor: "rgba(9,10,12,0.85)",
     paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
+    paddingVertical: 5,
+    borderRadius: radius.sm,
+    borderWidth: 1,
   },
-  riskDot: { width: 6, height: 6, borderRadius: 3 },
-  riskTagText: {
-    fontSize: 10,
-    letterSpacing: 1.6,
-    fontWeight: "500",
-  },
-  cardAge: {
+  scenarioBadgeText: { fontSize: 9, letterSpacing: 1.3, fontWeight: "500" },
+  attribution: {
+    position: "absolute",
+    right: spacing.sm,
+    bottom: 4,
     color: colors.onSurfaceTertiary,
-    fontSize: 10,
-    letterSpacing: 1.2,
+    fontSize: 9,
+    opacity: 0.8,
   },
-  cardTitleRow: {
+  modeRow: {
     flexDirection: "row",
-    alignItems: "center",
     gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
     marginTop: spacing.md,
   },
-  cardTitle: {
-    color: colors.onSurface,
-    fontSize: fonts.size.xl,
-    fontWeight: "500",
+  modeBtn: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.brand,
+    backgroundColor: "rgba(0,240,255,0.06)",
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+    minHeight: 56,
     flex: 1,
   },
-  metricsRow: {
+  modeBtnTitleRow: {
     flexDirection: "row",
-    alignItems: "stretch",
-    marginTop: spacing.lg,
-    backgroundColor: colors.surfaceTertiary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
+    alignItems: "center",
+    gap: spacing.sm,
+    flexWrap: "wrap",
   },
-  metric: { flex: 1, alignItems: "center" },
-  metricLabel: {
-    color: colors.onSurfaceTertiary,
-    fontSize: 10,
-    letterSpacing: 1.5,
-    marginBottom: 4,
-  },
-  metricValue: {
-    color: colors.onSurface,
-    fontSize: fonts.size.xl,
+  modeBtnText: { color: colors.brand, fontSize: fonts.size.sm, fontWeight: "500", letterSpacing: 1 },
+  experimentalTag: {
+    color: colors.warning,
+    fontSize: 9,
+    letterSpacing: 1.4,
     fontWeight: "500",
-    lineHeight: 28,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 3,
   },
-  metricUnit: {
+  modeBtnHint: {
     color: colors.onSurfaceSecondary,
     fontSize: 11,
-    marginLeft: 2,
-    marginBottom: 4,
+    marginTop: 4,
+    lineHeight: 16,
   },
-  vline: { width: 1, backgroundColor: colors.border, marginVertical: spacing.xs },
-  detailRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  detailText: { color: colors.onSurfaceSecondary, fontSize: fonts.size.sm },
-  actionAdvice: {
-    marginTop: spacing.md,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    backgroundColor: "rgba(248,81,73,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(248,81,73,0.35)",
-    borderRadius: radius.md,
-    paddingVertical: spacing.sm,
+  modeBtnGhost: {
     paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    minHeight: 44,
+    justifyContent: "center",
   },
-  actionAdviceText: {
-    fontSize: fonts.size.sm,
-    fontWeight: "500",
-    letterSpacing: 1.5,
+  modeBtnGhostText: { color: colors.onSurfaceSecondary, fontSize: fonts.size.sm, letterSpacing: 1 },
+  banner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.warning + "59",
+    backgroundColor: colors.warning + "14",
   },
-
-  // Action row
+  bannerText: { color: colors.warning, fontSize: fonts.size.sm, letterSpacing: 0.5 },
   actionRow: {
     flexDirection: "row",
     paddingHorizontal: spacing.md,
@@ -692,18 +912,144 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     gap: 2,
   },
-  actionBtnPrimary: {
+  actionBtnPrimary: { backgroundColor: colors.brand, borderColor: colors.brand },
+  actionBtnActive: { borderColor: colors.warning, backgroundColor: "rgba(210,153,34,0.08)" },
+  actionBtnText: { color: colors.onSurface, fontSize: 11, letterSpacing: 1.2, fontWeight: "500" },
+  demoPanel: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: spacing.md,
+  },
+  demoPanelHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  demoPanelTitle: {
+    color: colors.brand,
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 1.2,
+  },
+  roleSwitcher: {
+    flexDirection: "row",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  roleBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    alignItems: "center",
+  },
+  roleBtnActive: {
+    borderColor: colors.brand,
+    backgroundColor: "rgba(0,240,255,0.04)",
+  },
+  roleBtnText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  roleBtnTextActive: {
+    color: colors.brand,
+    fontWeight: "600",
+  },
+  observerControls: {
+    marginTop: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  submitObsBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
     backgroundColor: colors.brand,
+    paddingVertical: 12,
+    borderRadius: radius.sm,
+  },
+  submitObsBtnText: {
+    color: "#000",
+    fontWeight: "600",
+    fontSize: 12,
+    letterSpacing: 0.5,
+  },
+  observerHint: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 10,
+    marginTop: 6,
+    lineHeight: 14,
+  },
+  approachingHint: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 10,
+    marginBottom: spacing.sm,
+    lineHeight: 14,
+  },
+  resetDemoBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: colors.warning + "59",
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(210,153,34,0.04)",
+  },
+  resetDemoBtnText: {
+    color: colors.warning,
+    fontSize: 11,
+    fontWeight: "500",
+    letterSpacing: 0.5,
+  },
+  langSelectorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  langSelectorLabel: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 1.2,
+  },
+  langButtonsGroup: {
+    flexDirection: "row",
+    gap: spacing.sm,
+  },
+  langBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  langBtnActive: {
+    backgroundColor: "rgba(0,240,255,0.08)",
     borderColor: colors.brand,
   },
-  actionBtnActive: {
-    borderColor: colors.warning,
-    backgroundColor: "rgba(210,153,34,0.08)",
+  langBtnText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 1,
   },
-  actionBtnText: {
-    color: colors.onSurface,
-    fontSize: 11,
-    letterSpacing: 1.2,
-    fontWeight: "500",
+  langBtnTextActive: {
+    color: colors.brand,
   },
 });

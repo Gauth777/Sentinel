@@ -1,0 +1,28 @@
+{
+  "summary": "Phase 2 Sentinel (structured world model) fully tested. Backend: 7/7 pytest cases pass — /api/sentinel/status (connected/gps/4G/42/GST Road Northbound/N/4), /api/sentinel/hazards (hz-001 lat/lon, distanceMeters=180, confidence=91, sources=2, risk=high, routeRelevance=high, visibilityState=hidden, sourceType=shared_vehicle, recommendedAction='Reduce speed'), /api/sentinel/nearby-vehicles (4 entries with location.lat/lon + heading_degrees), /api/sentinel/world-model (scenarioId='gst-northbound-blind-turn-v1', telemetrySource='demo', ego.location, mapBounds.southWest/northEast, roads=3, buildings=8, occupiedRegions=4 incl. objectType='unknown', nearbyVehicles=4, hazards=2), POST confirm + report-incorrect increments + camelCase reportedIncorrect, 404 on unknown hazard, no _id leak. Frontend (mobile 375x667): Drive HUD shows SENTINEL/42/GST Road Northbound and ENGAGE GHOST VISION CTA navigates. Ghost Vision: top-status-strip with sentinel/gps/network chips + speed 42, mode-badge='DEMO', world-map SVG renders inside ghost-vision-map, telemetry-source-badge='DEMO SCENARIO · SIMULATED TELEMETRY', map-attribution shows OpenStreetMap, map-legend has You/Sentinel/Obstruction/Ghost hazard/Unknown, active-hazard-distance shows '≈180' and 'm'. HazardBottomSheet shows 'Stationary Vehicle Ahead', 'HIGH RISK', 'HIDDEN · Beyond line of sight', 180/91/2 metrics, 'REDUCE SPEED'. Tapping hazard-card-toggle expands to show 'Northbound lane', 'Shared by Sentinel network', 'Route relevance · HIGH'. Tapping engage-live-geo-button on web preview does NOT crash; renders map-error-state with Retry/Use Demo. bottom-action-row has 4 buttons. confirm-hazard-button POSTs and shows 'Hazard confirmed' flash; report-incorrect-button POSTs and shows 'Report submitted' flash; mute-voice-button toggles 'Voice' ↔ 'Muted'; return-to-drive-button navigates back to '/'. Every spec item passed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "GhostVisionScreen distance pill", "issue": "Console warning: 'props.pointerEvents is deprecated. Use style.pointerEvents'. Reference: /app/frontend/app/ghost-vision.tsx:211 — replace pointerEvents=\"none\" prop with style={{ pointerEvents: 'none' }} for RN 0.74+/Expo 54 compliance. Non-blocking."}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_sentinel.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "(Optional / cosmetic) Move pointerEvents=\"none\" from prop to style on the distance pill View in /app/frontend/app/ghost-vision.tsx:211 to silence the deprecation warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py: clean lifespan handler; all Mongo reads project out _id; new geo schema and seed are idempotent via ensure_seed().",
+    "WorldModel response uses a plain dict for /world-model; OK for now but consider returning the typed WorldModel pydantic model so FastAPI validates the contract on every response.",
+    "ghost-vision.tsx is ~660 lines and starts to combine UI, geo state, TTS, and actions; can be split further if it grows (HazardBottomSheet/MapLegend/WorldMap already modular)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "MongoDB hazards & nearby_vehicles re-seeded by ensure_seed() on first API call (already populated with the new geo schema).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend tests: pytest /app/backend/tests/test_sentinel.py -v. Use EXPO_PUBLIC_BACKEND_URL from /app/frontend/.env. Ghost Vision testIDs are stable: ghost-vision-screen, top-status-strip, sentinel/gps/network-status-chip, top-speed, mode-badge, ghost-vision-map, world-map, telemetry-source-badge, map-attribution, map-legend, active-hazard-distance, hazard-info-card, hazard-card-toggle, recommended-action, bottom-action-row, return-to-drive/confirm-hazard/report-incorrect/mute-voice-button, engage-live-geo-button, map-error-state. On web preview, useSentinelLocation immediately returns mode='unavailable' so engage-live-geo always falls through to MapErrorState — this is the intended behaviour, not a bug.",
+  "rca_of_issue": "N/A - no bugs found"
+}
