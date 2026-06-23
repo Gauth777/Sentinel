@@ -55,28 +55,28 @@ def test_status(client):
 
 # ===== Hazards =====
 def test_hazards(client):
+    client.post("/api/sentinel/demo/reset")
+
     r = client.get("/api/sentinel/hazards")
     assert r.status_code == 200
+
     arr = r.json()
-    assert isinstance(arr, list) and len(arr) >= 2
-    for item in arr:
-        assert "_id" not in item
-    hz = next((h for h in arr if h["id"] == "hz-001"), None)
-    assert hz is not None
-    assert hz["label"] == "Stationary Vehicle Ahead"
-    assert hz["distanceMeters"] == 180
-    assert hz["confidence"] == 91
-    assert hz["sources"] == 2
-    assert hz["risk"] == "high"
-    assert hz["direction"] == "Northbound lane"
-    assert hz["recommendedAction"] == "Reduce speed"
-    assert hz["routeRelevance"] == "high"
+    assert isinstance(arr, list)
+    assert {h["id"] for h in arr} == {"hz-002"}
+
+    hz = arr[0]
+    assert "_id" not in hz
+    assert hz["label"] == "Deep Pothole"
+    assert hz["distanceMeters"] == 340
+    assert hz["confidence"] == 76
+    assert hz["sources"] == 1
+    assert hz["risk"] == "medium"
+    assert hz["recommendedAction"] == "Move left"
+    assert hz["routeRelevance"] == "medium"
     assert hz["visibilityState"] == "hidden"
     assert hz["sourceType"] == "shared_vehicle"
-    loc = hz["location"]
-    assert "latitude" in loc and "longitude" in loc
-    assert 12.94 < loc["latitude"] < 12.95
-    assert 80.14 < loc["longitude"] < 80.16
+
+    assert all(h["type"] != "stationary_vehicle" for h in arr)
 
 
 # ===== Nearby Vehicles =====
@@ -115,13 +115,13 @@ def test_world_model(client):
 # ===== Confirm =====
 def test_confirm_increments(client):
     client.post("/api/sentinel/demo/reset")
-    r1 = client.post("/api/sentinel/hazards/hz-001/confirm")
+    r1 = client.post("/api/sentinel/hazards/hz-002/confirm")
     assert r1.status_code == 200
     d1 = r1.json()
     assert "_id" not in d1
-    assert d1["id"] == "hz-001"
+    assert d1["id"] == "hz-002"
     assert d1["confirmed"] == 1
-    r2 = client.post("/api/sentinel/hazards/hz-001/confirm")
+    r2 = client.post("/api/sentinel/hazards/hz-002/confirm")
     assert r2.status_code == 200
     assert r2.json()["confirmed"] == 1  # idempotent unique vote
 
@@ -129,12 +129,12 @@ def test_confirm_increments(client):
 # ===== Report incorrect =====
 def test_report_increments(client):
     client.post("/api/sentinel/demo/reset")
-    r1 = client.post("/api/sentinel/hazards/hz-001/report-incorrect")
+    r1 = client.post("/api/sentinel/hazards/hz-002/report-incorrect")
     assert r1.status_code == 200
     d1 = r1.json()
     assert "_id" not in d1
     assert d1["reportedIncorrect"] == 1
-    r2 = client.post("/api/sentinel/hazards/hz-001/report-incorrect")
+    r2 = client.post("/api/sentinel/hazards/hz-002/report-incorrect")
     assert r2.status_code == 200
     assert r2.json()["reportedIncorrect"] == 1  # idempotent unique vote
 
@@ -152,9 +152,9 @@ def test_old_schema_migration(client, sync_db):
     record was upserted into the new geo schema."""
     # Insert legacy record (no `location`, normalised x/y).
     legacy_hz = {
-        "id": "hz-001",
-        "type": "stationary_vehicle",
-        "label": "OLD: vehicle",
+        "id": "hz-002",
+        "type": "pothole",
+        "label": "OLD: pothole",
         "x": 0.5,
         "y": 0.2,
         "distance_m": 999,
@@ -164,17 +164,17 @@ def test_old_schema_migration(client, sync_db):
         "direction": "old",
         "recommended_action": "old",
         "risk": "low",
-        "confirmed": 5,            # counters must be preserved
+        "confirmed": 5,
         "reportedIncorrect": 2,
     }
-    sync_db.hazards.replace_one({"id": "hz-001"}, legacy_hz, upsert=True)
+    sync_db.hazards.replace_one({"id": "hz-002"}, legacy_hz, upsert=True)
     # Force re-migration by clearing the version sentinel.
     sync_db.sentinel_meta.delete_many({"id": "seed"})
 
     # Trigger ensure_seed via any endpoint.
     r = client.get("/api/sentinel/hazards")
     assert r.status_code == 200
-    hz = next(h for h in r.json() if h["id"] == "hz-001")
+    hz = next(h for h in r.json() if h["id"] == "hz-002")
     # Must now be the new schema.
     assert "location" in hz and "latitude" in hz["location"]
     assert hz["distanceMeters"] == 180
@@ -186,11 +186,11 @@ def test_old_schema_migration(client, sync_db):
 
 def test_repeated_seeding_is_idempotent(client, sync_db):
     """Calling endpoints repeatedly must not produce duplicates."""
-    before = sync_db.hazards.count_documents({"id": "hz-001"})
+    before = sync_db.hazards.count_documents({"id": "hz-002"})
     assert before == 1
     for _ in range(5):
         client.get("/api/sentinel/world-model").raise_for_status()
-    after = sync_db.hazards.count_documents({"id": "hz-001"})
+    after = sync_db.hazards.count_documents({"id": "hz-002"})
     assert after == 1
     assert sync_db.nearby_vehicles.count_documents({"id": "v-1"}) == 1
 
@@ -205,63 +205,107 @@ def test_seed_meta_records_version(client, sync_db):
 
 # ===== Matching & Observation Processing =====
 def test_new_observation_submission(client, sync_db):
-    # Reset demo data to ensure a clean slate (resets counters)
     client.post("/api/sentinel/demo/reset")
-    # Post a new observation
+
+    # Clean baseline: the shared stationary-vehicle Ghost must not exist yet.
+    baseline = client.get("/api/sentinel/world-model")
+    assert baseline.status_code == 200
+    assert all(
+        hazard["type"] != "stationary_vehicle"
+        for hazard in baseline.json()["hazards"]
+    )
+
     obs = {
-        "id": "obs-test-new-123",
+        "id": "obs-demo-stationary-001",
         "type": "stationary_vehicle",
-        "label": "Test Stationary Vehicle",
+        "label": "Stationary Vehicle Ahead",
         "location": {
             "latitude": 12.9452,
-            "longitude": 80.1506
+            "longitude": 80.1506,
         },
         "polygon": [
             {"latitude": 12.9451, "longitude": 80.1505},
-            {"latitude": 12.9453, "longitude": 80.1507}
+            {"latitude": 12.9451, "longitude": 80.1507},
+            {"latitude": 12.9453, "longitude": 80.1507},
+            {"latitude": 12.9453, "longitude": 80.1505},
         ],
         "sourceVehicleId": "v-1",
-        "vehicleLabel": "Sentinel-A8"
+        "vehicleLabel": "Sentinel-A8",
     }
-    r = client.post("/api/sentinel/demo/observation", json=obs)
-    assert r.status_code == 200
-    hazard = r.json()
-    assert hazard["id"].startswith("hz-")
-    assert hazard["type"] == "stationary_vehicle"
-    assert hazard["confidence"] == 60  # 1 source
-    assert hazard["sources"] == 1
-    
-    # Test idempotency (submit same observation ID)
+
+    # Observer creates a new shared hazard.
+    r1 = client.post("/api/sentinel/demo/observation", json=obs)
+    assert r1.status_code == 200
+
+    created = r1.json()
+    assert created["type"] == "stationary_vehicle"
+    assert created["sources"] == 1
+    assert created["confidence"] == 60
+    assert created["sourceType"] == "shared_vehicle"
+    assert created["visibilityState"] == "hidden"
+
+    # Approaching vehicle receives it through the updated world model.
+    after_submission = client.get("/api/sentinel/world-model")
+    assert after_submission.status_code == 200
+
+    stationary_hazards = [
+        hazard
+        for hazard in after_submission.json()["hazards"]
+        if hazard["type"] == "stationary_vehicle"
+    ]
+
+    assert len(stationary_hazards) == 1
+    assert stationary_hazards[0]["id"] == created["id"]
+
+    # Same observation ID is idempotent.
     r2 = client.post("/api/sentinel/demo/observation", json=obs)
     assert r2.status_code == 200
-    hazard2 = r2.json()
-    assert hazard2["id"] == hazard["id"]
-    
-    # Submit matching observation from another vehicle (v-2) within radius (50m)
-    obs_matching = {
-        "id": "obs-test-new-456",
-        "type": "stationary_vehicle",
-        "label": "Test Stationary Vehicle 2",
+
+    duplicate = r2.json()
+    assert duplicate["id"] == created["id"]
+    assert duplicate["sources"] == 1
+
+    after_duplicate = client.get("/api/sentinel/world-model").json()
+    stationary_after_duplicate = [
+        hazard
+        for hazard in after_duplicate["hazards"]
+        if hazard["type"] == "stationary_vehicle"
+    ]
+    assert len(stationary_after_duplicate) == 1
+
+    # A second independent vehicle should merge into the same hazard.
+    second_observation = {
+        **obs,
+        "id": "obs-demo-stationary-002",
+        "sourceVehicleId": "v-2",
+        "vehicleLabel": "Sentinel-C2",
         "location": {
             "latitude": 12.94522,
-            "longitude": 80.1505
+            "longitude": 80.1505,
         },
-        "sourceVehicleId": "v-2",
-        "vehicleLabel": "Sentinel-C2"
     }
-    r3 = client.post("/api/sentinel/demo/observation", json=obs_matching)
-    assert r3.status_code == 200
-    hazard3 = r3.json()
-    assert hazard3["id"] == hazard["id"]  # matched!
-    assert hazard3["sources"] == 2
-    assert hazard3["confidence"] in (79, 80)
-    
-    # Check warnings are generated in English, Hindi, Hinglish
-    assert "warnings" in hazard3
-    assert "en" in hazard3["warnings"]
-    assert "hi" in hazard3["warnings"]
-    assert "hinglish" in hazard3["warnings"]
 
+    r3 = client.post(
+        "/api/sentinel/demo/observation",
+        json=second_observation,
+    )
+    assert r3.status_code == 200
+
+    corroborated = r3.json()
+    assert corroborated["id"] == created["id"]
+    assert corroborated["sources"] == 2
+    assert corroborated["confidence"] in (79, 80)
+
+    # Reset removes the dynamic hazard and restores the clean baseline.
+    reset = client.post("/api/sentinel/demo/reset")
+    assert reset.status_code == 200
+
+    after_reset = client.get("/api/sentinel/world-model")
+    assert after_reset.status_code == 200
+    assert all(
+        hazard["type"] != "stationary_vehicle"
+        for hazard in after_reset.json()["hazards"]
+    )
 
 # ===== Warning translations =====
 def test_warning_translation_generation():

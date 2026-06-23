@@ -164,25 +164,6 @@ BUILDINGS = [
 
 SEED_HAZARDS = [
     {
-        "id": "hz-001",
-        "type": "stationary_vehicle",
-        "label": "Stationary Vehicle Ahead",
-        "location": off(180, 4),
-        "polygon": rect(180, 4, 5, 9),
-        "distanceMeters": 180,
-        "confidence": 91,
-        "sources": 2,
-        "observedSecondsAgo": 8,
-        "direction": "Northbound lane",
-        "recommendedAction": "Reduce speed",
-        "risk": "high",
-        "visibilityState": "hidden",
-        "sourceType": "shared_vehicle",
-        "routeRelevance": "high",
-        "confirmed": 0,
-        "reportedIncorrect": 0,
-    },
-    {
         "id": "hz-002",
         "type": "pothole",
         "label": "Deep Pothole",
@@ -282,7 +263,8 @@ ROAD_CORRIDOR = (
 # Bump SEED_VERSION when the demo data shape changes. ensure_seed() upserts each
 # known demo document by `id`, replacing old-schema records in-place. It does NOT
 # touch unrelated collections or user-generated records.
-SEED_VERSION = 2
+SEED_VERSION = 3
+DEPRECATED_SEED_HAZARD_IDS = ("hz-001",)
 
 
 async def ensure_seed() -> None:
@@ -298,6 +280,10 @@ async def ensure_seed() -> None:
     meta = await db.sentinel_meta.find_one({"id": "seed"})
     if meta and meta.get("version") == SEED_VERSION:
         return  # already migrated to the current shape
+    # Remove demo hazards retired from the baseline scenario.
+    for hazard_id in DEPRECATED_SEED_HAZARD_IDS:
+        await db.hazards.delete_many({"id": hazard_id})
+        await db.observations.delete_many({"hazard_id": hazard_id})
 
     from services.warning_service import WarningService
     # Migrate hazards: upsert each known demo hazard, keep counters if present.
@@ -471,7 +457,7 @@ async def report_incorrect(hazard_id: str):
 async def demo_observation(req: DemoObservationRequest):
     from workflows.hazard_workflow import LocalWorkflowRunner
     runner = LocalWorkflowRunner()
-    res = await runner.process_observation(req.dict())
+    res = await runner.process_observation(req.model_dump())
     return res
 
 

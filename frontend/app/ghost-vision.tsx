@@ -97,10 +97,10 @@ export default function GhostVisionScreen() {
 
   const onSubmitObservation = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Observation Submitted");
+    setActionFlash("Sharing observation…");
     try {
       const obs = {
-        id: `obs-demo-${Date.now()}`,
+        id: "obs-demo-stationary-001",
         type: "stationary_vehicle",
         label: "Stationary Vehicle Ahead",
         location: {
@@ -117,8 +117,10 @@ export default function GhostVisionScreen() {
         vehicleLabel: "Sentinel-A8"
       };
       await api.submitObservation(obs);
-      setTimeout(() => setActionFlash(null), 1800);
       await refetch();
+
+      setActionFlash("Observation shared with approaching vehicles");
+      setTimeout(() => setActionFlash(null), 2200);
     } catch (err: any) {
       console.error("Failed to submit observation:", err);
       setActionFlash("Submission Failed");
