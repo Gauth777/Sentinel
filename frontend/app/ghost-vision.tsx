@@ -231,6 +231,24 @@ export default function GhostVisionScreen() {
     [loc.mode, loc.location]
   );
 
+  const egoOverride = useMemo(() => {
+  if (loc.mode !== "live" || !loc.location) {
+    return undefined;
+  }
+
+  return {
+    location: loc.location,
+    headingDegrees:
+      typeof loc.headingDegrees === "number"
+        ? loc.headingDegrees
+        : 0,
+  };
+  }, [
+    loc.mode,
+    loc.location,
+    loc.headingDegrees,
+  ]);
+
   if (loading || !worldModel) {
     return (
       <View style={[styles.root, styles.center]} testID="ghost-vision-loading">
@@ -242,6 +260,9 @@ export default function GhostVisionScreen() {
 
   const mapH = Math.round(width * 1.05);
   const isLiveGeo = loc.mode === "live";
+  const displayedSpeedKmh = isLiveGeo
+  ? Math.round(loc.speedKmh)
+  : status?.speed_kmh ?? worldModel.ego.speedKmh;
   const showLiveError =
     loc.mode === "denied" || loc.mode === "unavailable" || loc.mode === "requesting";
 
@@ -272,7 +293,7 @@ export default function GhostVisionScreen() {
             />
           </View>
           <View style={styles.speedBlock} testID="top-speed">
-            <Text style={styles.speedTopNum}>{status?.speed_kmh ?? worldModel.ego.speedKmh}</Text>
+            <Text style={styles.speedTopNum}>{displayedSpeedKmh}</Text>
             <Text style={styles.speedTopUnit}>km/h</Text>
           </View>
         </View>
@@ -296,6 +317,7 @@ export default function GhostVisionScreen() {
               width={width}
               height={mapH}
               worldModel={worldModel}
+              egoOverride={egoOverride}
               boundsOverride={boundsOverride}
               activeHazardId={active?.id}
               paused={!isFocused}

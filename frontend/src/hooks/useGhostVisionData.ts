@@ -144,18 +144,38 @@ export function useGhostVisionData(liveInput?: GhostVisionLiveInput) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!liveTelemetry) return;
-    setWorldModel((wm) => (wm ? withLiveTelemetry(wm, liveTelemetry) : wm));
-  }, [liveTelemetry]);
+  const liveLatitude = liveTelemetry?.location.latitude;
+  const liveLongitude = liveTelemetry?.location.longitude;
 
   useEffect(() => {
-    if (!liveTelemetry) return;
-    const now = Date.now();
-    const next = { location: liveTelemetry.location, timestampMs: now };
-    if (!shouldRefreshWorldModel(lastBackendRefresh.current, next)) return;
-    fetch();
-  }, [fetch, liveTelemetry]);
+    const telemetry = liveTelemetryRef.current;
+    if (!telemetry) return;
+
+    // Locally update ego position and hazard distances only when position changes.
+    // Heading is rendered directly by GhostVisionScreen and should not rewrite
+    // the complete world model on every compass event.
+    setWorldModel((wm) =>
+      wm
+        ? withLiveTelemetry(wm, {
+            location: telemetry.location,
+            headingDegrees: wm.ego.headingDegrees,
+          })
+        : wm
+    );
+  }, [liveLatitude, liveLongitude]);
+
+  useEffect(() => {
+  const telemetry = liveTelemetryRef.current;
+  if (!telemetry) return;
+
+  const next = {
+    location: telemetry.location,
+    timestampMs: Date.now(),
+  };
+
+  if (!shouldRefreshWorldModel(lastBackendRefresh.current, next)) return;
+  fetch();
+  }, [fetch, liveLatitude, liveLongitude]);
 
   const confirm = useCallback(async (id: string) => {
     try {
