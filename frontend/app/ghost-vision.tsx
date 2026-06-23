@@ -391,7 +391,7 @@ export default function GhostVisionScreen() {
               </View>
             ) : (
               <Text style={styles.approachingHint}>
-                Approaching vehicle queries relevant hazards and shows the observer's hazard as a hidden Ghost object.
+                Approaching vehicle queries relevant hazards and shows the observer hazard as a hidden Ghost object.
               </Text>
             )}
 
