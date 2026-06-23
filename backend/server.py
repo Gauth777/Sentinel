@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Query
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from pymongo import MongoClient
 from utils.mongo_mock import MOCK_DB_STATE
+from utils.geo import haversine_meters, offset_point
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -132,6 +133,8 @@ class WorldModel(BaseModel):
 EGO = {"latitude": 12.9436, "longitude": 80.1502}
 LAT_M = 1.0 / 111_111
 LON_M = 1.0 / (111_111 * math.cos(math.radians(EGO["latitude"])))
+DEFAULT_LIVE_RADIUS_M = 800.0
+MAX_LIVE_RADIUS_M = 2_000.0
 
 
 def off(dN: float, dE: float) -> dict:
@@ -145,6 +148,124 @@ def rect(cN: float, cE: float, w: float, h: float) -> list:
         off(cN + h / 2, cE + w / 2),
         off(cN + h / 2, cE - w / 2),
     ]
+
+
+def route_relevance_for_distance(distance_meters: float) -> str:
+    if distance_meters <= 180:
+        return "high"
+    if distance_meters <= 400:
+        return "medium"
+    if distance_meters <= 800:
+        return "low"
+    return "none"
+
+
+def normalize_heading_degrees(heading: Optional[float], fallback: float = 0) -> float:
+    if heading is None or not math.isfinite(heading) or heading < 0:
+        return fallback
+    return heading % 360
+
+
+def bounds_around(center: dict, radius_m: float) -> dict:
+    d_lat = radius_m / 111_111
+    d_lon = radius_m / (111_111 * max(0.01, math.cos(math.radians(center["latitude"]))))
+    return {
+        "southWest": {"latitude": center["latitude"] - d_lat, "longitude": center["longitude"] - d_lon},
+        "northEast": {"latitude": center["latitude"] + d_lat, "longitude": center["longitude"] + d_lon},
+    }
+
+
+def live_context_origin(latitude: float, longitude: float) -> dict:
+    # Stable roughly 550 m grid. Nearby GPS updates keep the same synthetic road geometry.
+    tile_deg = 0.005
+    return {
+        "latitude": math.floor(latitude / tile_deg) * tile_deg + tile_deg / 2,
+        "longitude": math.floor(longitude / tile_deg) * tile_deg + tile_deg / 2,
+    }
+
+
+def live_off(origin: dict, dN: float, dE: float) -> dict:
+    return offset_point(origin["latitude"], origin["longitude"], dN, dE)
+
+
+def live_rect(origin: dict, cN: float, cE: float, w: float, h: float) -> list:
+    return [
+        live_off(origin, cN - h / 2, cE - w / 2),
+        live_off(origin, cN - h / 2, cE + w / 2),
+        live_off(origin, cN + h / 2, cE + w / 2),
+        live_off(origin, cN + h / 2, cE - w / 2),
+    ]
+
+
+def build_live_synthetic_context(origin: dict) -> dict:
+    main_road = [
+        live_off(origin, -420, -3),
+        live_off(origin, -240, 1),
+        live_off(origin, -80, -2),
+        live_off(origin, 100, 2),
+        live_off(origin, 280, -1),
+        live_off(origin, 460, 4),
+    ]
+    cross_road = [
+        live_off(origin, -10, -260),
+        live_off(origin, -8, -80),
+        live_off(origin, -4, 90),
+        live_off(origin, 0, 260),
+    ]
+    service_road = [
+        live_off(origin, -210, 78),
+        live_off(origin, -40, 82),
+        live_off(origin, 150, 78),
+        live_off(origin, 340, 86),
+    ]
+    buildings = [
+        {"id": f"live-b{i}", "polygon": live_rect(origin, n, e, w, h)}
+        for i, (n, e, w, h) in enumerate(
+            [
+                (-210, -58, 32, 80),
+                (-80, -62, 30, 72),
+                (80, -62, 36, 96),
+                (245, -58, 32, 84),
+                (-230, 60, 34, 78),
+                (-55, 62, 30, 86),
+                (125, 60, 38, 72),
+                (310, 62, 34, 82),
+            ],
+            start=1,
+        )
+    ]
+    road_corridor = (
+        [{"latitude": p["latitude"], "longitude": p["longitude"] - 6 / (111_111 * max(0.01, math.cos(math.radians(origin["latitude"]))))} for p in main_road]
+        + [{"latitude": p["latitude"], "longitude": p["longitude"] + 6 / (111_111 * max(0.01, math.cos(math.radians(origin["latitude"]))))} for p in reversed(main_road)]
+    )
+    occupied = [
+        {
+            "id": "live-or-1",
+            "sourceType": "demo",
+            "visibilityState": "uncertain",
+            "objectType": "unknown",
+            "polygon": live_rect(origin, 55, -12, 3, 3),
+            "center": live_off(origin, 55, -12),
+            "approximateDistanceMeters": 55,
+            "confidence": 48,
+            "motion": "unknown",
+            "routeRelevance": "low",
+            "observedSecondsAgo": 5,
+            "label": "Synthetic occupied region",
+        }
+    ]
+    return {
+        "mapCenter": origin,
+        "mapBounds": bounds_around(origin, 520),
+        "roadCorridor": road_corridor,
+        "roads": [
+            {"id": "live-main", "path": main_road, "name": "Synthetic local corridor", "lanes": 2},
+            {"id": "live-cross", "path": cross_road, "name": "Synthetic cross street"},
+            {"id": "live-service", "path": service_road, "name": "Synthetic service lane"},
+        ],
+        "buildings": buildings,
+        "occupiedRegions": occupied,
+    }
 
 
 GST_ROAD = [off(-260, 0), off(-120, -4), off(0, 0), off(140, 6), off(280, 2), off(420, 10)]
@@ -358,13 +479,63 @@ async def list_nearby_vehicles():
 
 
 @api_router.get("/sentinel/world-model", response_model=WorldModel)
-async def get_world_model():
+async def get_world_model(
+    latitude: Optional[float] = Query(default=None),
+    longitude: Optional[float] = Query(default=None),
+    heading: Optional[float] = Query(default=None),
+    radius_m: Optional[float] = Query(default=None, gt=0),
+):
     """Return the structured local world model for Ghost Vision.
-    telemetrySource is currently 'demo' (deterministic mock); future builds
-    will switch to 'live' once a real perception pipeline is connected."""
+
+    With no coordinates this is the deterministic demo scenario. With live
+    coordinates it uses real ego telemetry plus a clearly synthetic local road
+    context; shared hazards remain stored at absolute coordinates.
+    """
     await ensure_seed()
     hazards_docs = await db.hazards.find({}, {"_id": 0}).to_list(100)
     vehicles_docs = await db.nearby_vehicles.find({}, {"_id": 0}).to_list(100)
+
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(status_code=400, detail="latitude and longitude must be supplied together")
+
+    if latitude is not None and longitude is not None:
+        live_radius = min(radius_m or DEFAULT_LIVE_RADIUS_M, MAX_LIVE_RADIUS_M)
+        ego_location = {"latitude": latitude, "longitude": longitude}
+        live_hazards = []
+        for hazard in hazards_docs:
+            if hazard.get("status", "active") != "active":
+                continue
+            h_location = hazard.get("location")
+            if not h_location:
+                continue
+            distance = haversine_meters(
+                latitude,
+                longitude,
+                h_location["latitude"],
+                h_location["longitude"],
+            )
+            if distance > live_radius:
+                continue
+            updated_hazard = dict(hazard)
+            updated_hazard["distanceMeters"] = round(distance, 1)
+            updated_hazard["routeRelevance"] = route_relevance_for_distance(distance)
+            live_hazards.append(updated_hazard)
+
+        live_hazards.sort(key=lambda h: h["distanceMeters"])
+        origin = live_context_origin(latitude, longitude)
+        context = build_live_synthetic_context(origin)
+        return {
+            "scenarioId": "live-gps-synthetic-context-v1",
+            "telemetrySource": "live",
+            "ego": {
+                "location": ego_location,
+                "headingDegrees": normalize_heading_degrees(heading),
+                "speedKmh": 0,
+            },
+            **context,
+            "nearbyVehicles": vehicles_docs,
+            "hazards": live_hazards,
+        }
 
     return {
         "scenarioId": "gst-northbound-blind-turn-v1",

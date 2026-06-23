@@ -10,7 +10,16 @@ import type {
   WorldModel,
 } from "@/src/types/sentinel";
 
-const BASE = (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
+export type WorldModelParams = {
+  latitude?: number;
+  longitude?: number;
+  heading?: number;
+  radius_m?: number;
+};
+
+function backendBase() {
+  return (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
+}
 
 export class ApiError extends Error {
   status?: number;
@@ -22,12 +31,13 @@ export class ApiError extends Error {
 }
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!BASE) {
+  const base = backendBase();
+  if (!base) {
     throw new ApiError("EXPO_PUBLIC_BACKEND_URL is not configured");
   }
   let res: Response;
   try {
-    res = await fetch(`${BASE}/api${path}`, {
+    res = await fetch(`${base}/api${path}`, {
       headers: { "Content-Type": "application/json" },
       ...init,
     });
@@ -41,11 +51,19 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  hasBackend: () => Boolean(BASE),
+  hasBackend: () => Boolean(backendBase()),
   status: () => j<SentinelStatus>("/sentinel/status"),
   hazards: () => j<Hazard[]>("/sentinel/hazards"),
   nearby: () => j<NearbyVehicle[]>("/sentinel/nearby-vehicles"),
-  worldModel: () => j<WorldModel>("/sentinel/world-model"),
+  worldModel: (params?: WorldModelParams) => {
+    const query = new URLSearchParams();
+    if (typeof params?.latitude === "number") query.set("latitude", String(params.latitude));
+    if (typeof params?.longitude === "number") query.set("longitude", String(params.longitude));
+    if (typeof params?.heading === "number") query.set("heading", String(params.heading));
+    if (typeof params?.radius_m === "number") query.set("radius_m", String(params.radius_m));
+    const qs = query.toString();
+    return j<WorldModel>(`/sentinel/world-model${qs ? `?${qs}` : ""}`);
+  },
   confirm: (id: string) =>
     j<{ id: string; confirmed: number; reportedIncorrect: number }>(
       `/sentinel/hazards/${id}/confirm`,

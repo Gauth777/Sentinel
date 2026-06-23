@@ -14,6 +14,7 @@ from server import app, db, MONGO_REACHABLE, mongo_url
 from utils.mongo_mock import MOCK_SYNC_DB_STATE
 from services.warning_service import WarningService
 from services.neo4j_service import Neo4jService
+from utils.geo import destination_point, haversine_meters
 
 @pytest.fixture
 def anyio_backend():
@@ -93,12 +94,14 @@ def test_nearby_vehicles(client):
 
 # ===== World model =====
 def test_world_model(client):
+    client.post("/api/sentinel/demo/reset")
+
     r = client.get("/api/sentinel/world-model")
     assert r.status_code == 200
     wm = r.json()
     assert "_id" not in wm
     assert wm["scenarioId"] == "gst-northbound-blind-turn-v1"
-    assert wm["telemetrySource"] in ("live", "cached", "demo")
+    assert wm["telemetrySource"] == "demo"
     assert "ego" in wm and "location" in wm["ego"]
     assert "mapBounds" in wm and "southWest" in wm["mapBounds"]
     assert isinstance(wm["roads"], list) and len(wm["roads"]) >= 1
@@ -110,6 +113,111 @@ def test_world_model(client):
     assert "local_sensor" in types
     obj_types = {o["objectType"] for o in wm["occupiedRegions"]}
     assert "unknown" in obj_types
+
+
+def test_live_world_model_uses_supplied_ego(client):
+    client.post("/api/sentinel/demo/reset")
+
+    latitude = 12.9436
+    longitude = 80.1502
+    heading = 37.5
+    r = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": latitude, "longitude": longitude, "heading": heading},
+    )
+    assert r.status_code == 200
+
+    wm = r.json()
+    assert wm["telemetrySource"] == "live"
+    assert wm["scenarioId"] == "live-gps-synthetic-context-v1"
+    assert wm["ego"]["location"] == {"latitude": latitude, "longitude": longitude}
+    assert wm["ego"]["headingDegrees"] == heading
+    assert wm["roads"][0]["name"] == "Synthetic local corridor"
+
+
+def test_live_world_model_normalizes_invalid_heading(client):
+    client.post("/api/sentinel/demo/reset")
+
+    r = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": 12.9436, "longitude": 80.1502, "heading": -1},
+    )
+    assert r.status_code == 200
+    assert r.json()["ego"]["headingDegrees"] == 0
+
+
+def test_live_world_model_recalculates_hazard_distances(client):
+    client.post("/api/sentinel/demo/reset")
+
+    near = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": 12.9436, "longitude": 80.1502, "heading": 0, "radius_m": 1000},
+    ).json()
+    moved_north = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": 12.9445, "longitude": 80.1502, "heading": 0, "radius_m": 1000},
+    ).json()
+
+    near_hazard = next(h for h in near["hazards"] if h["id"] == "hz-002")
+    moved_hazard = next(h for h in moved_north["hazards"] if h["id"] == "hz-002")
+    assert near_hazard["location"] == moved_hazard["location"]
+    assert near_hazard["distanceMeters"] != moved_hazard["distanceMeters"]
+    expected = haversine_meters(
+        12.9445,
+        80.1502,
+        moved_hazard["location"]["latitude"],
+        moved_hazard["location"]["longitude"],
+    )
+    assert moved_hazard["distanceMeters"] == pytest.approx(expected, abs=0.2)
+
+
+def test_live_world_model_radius_filters_distant_hazards(client):
+    client.post("/api/sentinel/demo/reset")
+
+    r = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": 12.9436, "longitude": 80.1502, "heading": 0, "radius_m": 50},
+    )
+    assert r.status_code == 200
+    assert all(h["id"] != "hz-002" for h in r.json()["hazards"])
+
+
+def test_live_observation_submission_is_idempotent_and_resettable(client):
+    client.post("/api/sentinel/demo/reset")
+
+    ego = {"latitude": 12.9436, "longitude": 80.1502}
+    hazard_location = destination_point(ego["latitude"], ego["longitude"], 8, 120)
+    obs = {
+        "id": "obs-live-demo-stationary-ahead",
+        "type": "stationary_vehicle",
+        "label": "Stationary Vehicle Ahead",
+        "location": hazard_location,
+        "polygon": None,
+        "sourceVehicleId": "v-live-observer",
+        "vehicleLabel": "Live Sentinel Observer",
+    }
+
+    first = client.post("/api/sentinel/demo/observation", json=obs)
+    assert first.status_code == 200
+    second = client.post("/api/sentinel/demo/observation", json=obs)
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["sources"] == 1
+
+    live_wm = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": ego["latitude"], "longitude": ego["longitude"], "heading": 8, "radius_m": 250},
+    ).json()
+    matching = [h for h in live_wm["hazards"] if h["type"] == "stationary_vehicle"]
+    assert len(matching) == 1
+    assert matching[0]["id"] == first.json()["id"]
+
+    client.post("/api/sentinel/demo/reset").raise_for_status()
+    after_reset = client.get(
+        "/api/sentinel/world-model",
+        params={"latitude": ego["latitude"], "longitude": ego["longitude"], "heading": 8, "radius_m": 250},
+    ).json()
+    assert all(h["type"] != "stationary_vehicle" for h in after_reset["hazards"])
 
 
 # ===== Confirm =====
@@ -177,8 +285,8 @@ def test_old_schema_migration(client, sync_db):
     hz = next(h for h in r.json() if h["id"] == "hz-002")
     # Must now be the new schema.
     assert "location" in hz and "latitude" in hz["location"]
-    assert hz["distanceMeters"] == 180
-    assert hz["risk"] == "high"
+    assert hz["distanceMeters"] == 340
+    assert hz["risk"] == "medium"
     # Counters preserved.
     assert hz["confirmed"] >= 5
     assert hz["reportedIncorrect"] >= 2

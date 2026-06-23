@@ -1,12 +1,25 @@
 // Orchestrates the world-model: tries backend, falls back to bundled demo scenario.
 // Returns { worldModel, status, source, loading, error, refetch, confirm, report }.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "@/src/api/sentinel";
 import { demoScenario } from "@/src/data/demoScenario";
-import type { Hazard, SentinelStatus, WorldModel } from "@/src/types/sentinel";
+import type { GeoPoint, Hazard, SentinelStatus, WorldModel } from "@/src/types/sentinel";
+import {
+  LIVE_WORLD_RADIUS_M,
+  type LiveTelemetryInput,
+  type RefreshSnapshot,
+  shouldRefreshWorldModel,
+  withLiveTelemetry,
+} from "@/src/utils/ghostVisionLive";
 
 export type WorldSource = "backend" | "demo";
+
+export type GhostVisionLiveInput = {
+  enabled: boolean;
+  location: GeoPoint | null;
+  headingDegrees: number | null;
+};
 
 const DEMO_STATUS: SentinelStatus = {
   connected: false,
@@ -18,38 +31,131 @@ const DEMO_STATUS: SentinelStatus = {
   sentinel_vehicles_nearby: demoScenario.nearbyVehicles.length,
 };
 
-export function useGhostVisionData() {
+export function useGhostVisionData(liveInput?: GhostVisionLiveInput) {
   const [worldModel, setWorldModel] = useState<WorldModel | null>(null);
   const [status, setStatus] = useState<SentinelStatus | null>(null);
   const [source, setSource] = useState<WorldSource>("demo");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestSeq = useRef(0);
+  const inFlight = useRef(false);
+  const queuedRefresh = useRef(false);
+  const lastBackendRefresh = useRef<RefreshSnapshot | null>(null);
+  const worldModelRef = useRef<WorldModel | null>(null);
+  const liveTelemetryRef = useRef<LiveTelemetryInput | null>(null);
+  const mountedRef = useRef(true);
+  const queuedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fetch = useCallback(async () => {
-    setLoading(true);
+  useEffect(() => {
+    worldModelRef.current = worldModel;
+  }, [worldModel]);
+
+  const liveTelemetry = useMemo(
+    () =>
+      liveInput?.enabled && liveInput.location
+        ? { location: liveInput.location, headingDegrees: liveInput.headingDegrees }
+        : null,
+    [
+      liveInput?.enabled,
+      liveInput?.location?.latitude,
+      liveInput?.location?.longitude,
+      liveInput?.headingDegrees,
+    ]
+  );
+
+  useEffect(() => {
+    liveTelemetryRef.current = liveTelemetry;
+  }, [liveTelemetry]);
+
+  const fetch = useCallback(async (force = false) => {
+    if (inFlight.current) {
+      queuedRefresh.current = queuedRefresh.current || force || Boolean(liveTelemetryRef.current);
+      return;
+    }
+    inFlight.current = true;
+    const seq = requestSeq.current + 1;
+    requestSeq.current = seq;
+    const initialLoad = !worldModelRef.current;
+    if (initialLoad) setLoading(true);
     setError(null);
     try {
       if (!api.hasBackend()) throw new ApiError("No backend URL");
-      const [wm, st] = await Promise.all([api.worldModel(), api.status()]);
-      setWorldModel(wm);
+      const requestTelemetry = liveTelemetryRef.current;
+      const params = requestTelemetry
+        ? {
+            latitude: requestTelemetry.location.latitude,
+            longitude: requestTelemetry.location.longitude,
+            heading:
+              typeof requestTelemetry.headingDegrees === "number"
+                ? requestTelemetry.headingDegrees
+                : undefined,
+            radius_m: LIVE_WORLD_RADIUS_M,
+          }
+        : undefined;
+      const [wm, st] = await Promise.all([api.worldModel(params), api.status()]);
+      if (seq !== requestSeq.current) return;
+      if (!mountedRef.current) return;
+      const latestTelemetry = liveTelemetryRef.current;
+      if (requestTelemetry && !latestTelemetry) {
+        queuedRefresh.current = true;
+        return;
+      }
+      setWorldModel(latestTelemetry ? withLiveTelemetry(wm, latestTelemetry) : wm);
       setStatus(st);
       setSource("backend");
+      if (requestTelemetry) {
+        lastBackendRefresh.current = { location: requestTelemetry.location, timestampMs: Date.now() };
+      }
     } catch (err: any) {
+      if (seq !== requestSeq.current) return;
+      if (!mountedRef.current) return;
       // Fallback to bundled demo so Ghost Vision still works offline.
       // Surface the error message in dev so we can see *why* fallback was used.
       console.warn("[Sentinel] world-model fetch failed, using demo scenario:", err?.message ?? err);
-      setWorldModel(demoScenario);
-      setStatus(DEMO_STATUS);
-      setSource("demo");
+      if (!worldModelRef.current) {
+        const latestTelemetry = liveTelemetryRef.current;
+        setWorldModel(latestTelemetry ? withLiveTelemetry(demoScenario, latestTelemetry) : demoScenario);
+        setStatus(DEMO_STATUS);
+        setSource("demo");
+      }
       setError(err?.message ?? String(err));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current && mountedRef.current) {
+        setLoading(false);
+        inFlight.current = false;
+        if (queuedRefresh.current) {
+          queuedRefresh.current = false;
+          queuedTimerRef.current = setTimeout(() => fetch(true), 0);
+        }
+      }
     }
   }, []);
 
   useEffect(() => {
-    fetch();
+    fetch(true);
   }, [fetch]);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (queuedTimerRef.current) {
+        clearTimeout(queuedTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!liveTelemetry) return;
+    setWorldModel((wm) => (wm ? withLiveTelemetry(wm, liveTelemetry) : wm));
+  }, [liveTelemetry]);
+
+  useEffect(() => {
+    if (!liveTelemetry) return;
+    const now = Date.now();
+    const next = { location: liveTelemetry.location, timestampMs: now };
+    if (!shouldRefreshWorldModel(lastBackendRefresh.current, next)) return;
+    fetch();
+  }, [fetch, liveTelemetry]);
 
   const confirm = useCallback(async (id: string) => {
     try {

@@ -5,6 +5,7 @@ import time
 from typing import Dict, List, Optional
 from services.neo4j_service import Neo4jService
 from services.warning_service import WarningService
+from utils.geo import haversine_meters
 
 # Workflow Settings
 MATCH_RADIUS_METERS = 50.0
@@ -12,14 +13,8 @@ MATCH_WINDOW_SECONDS = 600  # 10 minutes
 EXPIRY_SECONDS = 3600       # 1 hour
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculates flat distance in meters between two coordinates (approximated for Tambaram, Chennai)."""
-    # 1 degree lat = ~111,111 m; 1 degree lon = ~111,111 * cos(lat)
-    lat_m = 111111.0
-    lon_m = 111111.0 * math.cos(math.radians(12.9436))
-    
-    dn = (lat1 - lat2) * lat_m
-    de = (lon1 - lon2) * lon_m
-    return math.sqrt(dn * dn + de * de)
+    """Calculates distance in metres between two coordinates."""
+    return haversine_meters(lat1, lon1, lat2, lon2)
 
 
 class WorkflowRunner:

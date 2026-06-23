@@ -25,6 +25,7 @@ import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
 import type { Hazard } from "@/src/types/sentinel";
 import { api } from "@/src/api/sentinel";
+import { buildLiveObservation } from "@/src/utils/ghostVisionLive";
 
 // process.env.EXPO_PUBLIC_MAP_STYLE_URL is reserved for the native MapLibre adapter
 // that ships in the Android development build. Web preview always uses the SVG WorldMap.
@@ -34,9 +35,13 @@ export default function GhostVisionScreen() {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
 
-  const { worldModel, status, source, loading, error, refetch, confirm, report } =
-    useGhostVisionData();
   const loc = useSentinelLocation();
+  const { worldModel, status, source, loading, error, refetch, confirm, report } =
+    useGhostVisionData({
+      enabled: loc.mode === "live",
+      location: loc.location,
+      headingDegrees: loc.headingDegrees,
+    });
   const isFocused = useIsFocused();
 
   const [activeHazardId, setActiveHazardId] = useState<string | null>(null);
@@ -44,9 +49,32 @@ export default function GhostVisionScreen() {
   const [muted, setMuted] = useState(false);
   const [actionFlash, setActionFlash] = useState<string | null>(null);
   const spokenForId = useRef<string | null>(null);
+  const actionFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [selectedLanguage, setSelectedLanguage] = useState<"en" | "hi" | "hinglish">("en");
   const [role, setRole] = useState<"approaching" | "observer">("approaching");
+
+  const showActionFlash = useCallback((message: string | null, durationMs?: number) => {
+    if (actionFlashTimer.current) {
+      clearTimeout(actionFlashTimer.current);
+      actionFlashTimer.current = null;
+    }
+    setActionFlash(message);
+    if (message && durationMs) {
+      actionFlashTimer.current = setTimeout(() => {
+        setActionFlash(null);
+        actionFlashTimer.current = null;
+      }, durationMs);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (actionFlashTimer.current) {
+        clearTimeout(actionFlashTimer.current);
+      }
+    };
+  }, []);
 
   // Pick the primary hazard the first time the world model loads (and only if
   // nothing is selected yet, or the selected id no longer exists).
@@ -97,51 +125,59 @@ export default function GhostVisionScreen() {
 
   const onSubmitObservation = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Sharing observation…");
+    showActionFlash("Sharing observation…");
     try {
-      const obs = {
-        id: "obs-demo-stationary-001",
-        type: "stationary_vehicle",
-        label: "Stationary Vehicle Ahead",
-        location: {
-          latitude: 12.9452,
-          longitude: 80.1506
-        },
-        polygon: [
-          { latitude: 12.9451, longitude: 80.1505 },
-          { latitude: 12.9451, longitude: 80.1507 },
-          { latitude: 12.9453, longitude: 80.1507 },
-          { latitude: 12.9453, longitude: 80.1505 }
-        ],
-        sourceVehicleId: "v-1",
-        vehicleLabel: "Sentinel-A8"
-      };
+      const obs =
+        loc.mode === "live" && loc.location
+          ? buildLiveObservation({
+              location: loc.location,
+              headingDegrees: loc.headingDegrees,
+            })
+          : {
+              id: "obs-demo-stationary-001",
+              type: "stationary_vehicle",
+              label: "Stationary Vehicle Ahead",
+              location: {
+                latitude: 12.9452,
+                longitude: 80.1506
+              },
+              polygon: [
+                { latitude: 12.9451, longitude: 80.1505 },
+                { latitude: 12.9451, longitude: 80.1507 },
+                { latitude: 12.9453, longitude: 80.1507 },
+                { latitude: 12.9453, longitude: 80.1505 }
+              ],
+              sourceVehicleId: "v-1",
+              vehicleLabel: "Sentinel-A8"
+            };
       await api.submitObservation(obs);
-      await refetch();
+      await refetch(true);
 
-      setActionFlash("Observation shared with approaching vehicles");
-      setTimeout(() => setActionFlash(null), 2200);
+      showActionFlash(
+        loc.mode === "live"
+          ? "Live hazard shared with approaching vehicles"
+          : "Observation shared with approaching vehicles",
+        2200
+      );
     } catch (err: any) {
       console.error("Failed to submit observation:", err);
-      setActionFlash("Submission Failed");
-      setTimeout(() => setActionFlash(null), 1800);
+      showActionFlash("Submission Failed", 1800);
     }
-  }, [refetch]);
+  }, [loc.headingDegrees, loc.location, loc.mode, refetch, showActionFlash]);
 
   const onResetDemo = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Resetting Demo");
+    showActionFlash("Resetting Demo");
     try {
       await api.resetDemo();
-      setTimeout(() => setActionFlash(null), 1800);
-      await refetch();
+      showActionFlash("Demo reset", 1800);
+      await refetch(true);
       setActiveHazardId(null);
     } catch (err) {
       console.error("Failed to reset demo:", err);
-      setActionFlash("Reset Failed");
-      setTimeout(() => setActionFlash(null), 1800);
+      showActionFlash("Reset Failed", 1800);
     }
-  }, [refetch]);
+  }, [refetch, showActionFlash]);
 
   useFocusEffect(
     useCallback(() => {
@@ -154,18 +190,16 @@ export default function GhostVisionScreen() {
   const onConfirm = useCallback(async () => {
     if (!active) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Hazard confirmed");
+    showActionFlash("Hazard confirmed", 1800);
     await confirm(active.id);
-    setTimeout(() => setActionFlash(null), 1800);
-  }, [active, confirm]);
+  }, [active, confirm, showActionFlash]);
 
   const onReport = useCallback(async () => {
     if (!active) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    setActionFlash("Report submitted");
+    showActionFlash("Report submitted", 1800);
     await report(active.id);
-    setTimeout(() => setActionFlash(null), 1800);
-  }, [active, report]);
+  }, [active, report, showActionFlash]);
 
   const onMute = useCallback(() => {
     Haptics.selectionAsync().catch(() => {});
@@ -192,19 +226,10 @@ export default function GhostVisionScreen() {
     loc.switchToDemo();
   }, [loc]);
 
-  // Compose ego override + bounds override based on location mode.
-  const liveOverride = useMemo(() => {
-    if (loc.mode === "live" && loc.location) {
-      return {
-        egoOverride: {
-          location: loc.location,
-          headingDegrees: typeof loc.headingDegrees === "number" ? loc.headingDegrees : undefined,
-        },
-        boundsOverride: boundsAround(loc.location, 280),
-      };
-    }
-    return {};
-  }, [loc.mode, loc.location, loc.headingDegrees]);
+  const boundsOverride = useMemo(
+    () => (loc.mode === "live" && loc.location ? boundsAround(loc.location, 280) : undefined),
+    [loc.mode, loc.location]
+  );
 
   if (loading || !worldModel) {
     return (
@@ -271,8 +296,7 @@ export default function GhostVisionScreen() {
               width={width}
               height={mapH}
               worldModel={worldModel}
-              egoOverride={liveOverride.egoOverride}
-              boundsOverride={liveOverride.boundsOverride}
+              boundsOverride={boundsOverride}
               activeHazardId={active?.id}
               paused={!isFocused}
               onHazardPress={(h) => {
@@ -327,14 +351,14 @@ export default function GhostVisionScreen() {
                 ]}
               >
                 {isLiveGeo
-                  ? "GPS POSITION PREVIEW · EXPERIMENTAL"
+                  ? "LIVE GPS · SHARED HAZARD LAYER"
                   : "DEMO SCENARIO · SIMULATED TELEMETRY"}
               </Text>
             </View>
 
             {/* Attribution */}
             <Text style={styles.attribution} testID="map-attribution">
-              Synthetic GST Road demo scenario
+              Synthetic Sentinel context; not real map data
             </Text>
 
             <MapLegend />
@@ -423,12 +447,12 @@ export default function GhostVisionScreen() {
                     <Text style={styles.modeBtnText}>
                       {loc.mode === "requesting"
                         ? "REQUESTING GPS…"
-                        : "GPS POSITION PREVIEW"}
+                        : "LIVE GPS"}
                     </Text>
                     <Text style={styles.experimentalTag}>EXPERIMENTAL</Text>
                   </View>
                   <Text style={styles.modeBtnHint}>
-                    Uses live device position with simulated Sentinel world-model overlays. Roads and buildings around your real location are not loaded.
+                    Uses live device position with a shared hazard layer and synthetic Sentinel context.
                   </Text>
                 </View>
               </Pressable>
@@ -602,7 +626,7 @@ function ModeBadge({
           { color: isLive ? colors.success : colors.warning },
         ]}
       >
-        {isLive ? "LIVE GEO" : telemetry === "demo" ? "DEMO" : source === "backend" ? "CACHED" : "DEMO"}
+        {isLive ? "LIVE GPS" : telemetry === "demo" ? "DEMO" : source === "backend" ? "CACHED" : "DEMO"}
       </Text>
     </View>
   );
