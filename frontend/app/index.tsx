@@ -99,7 +99,7 @@ export default function DriveHUD() {
             android_ripple={{ color: "#003844" }}
           >
             {loading ? (
-              <ActivityIndicator color={colors.onBrandPrimary as any} />
+              <ActivityIndicator color="#000" />
             ) : (
               <>
                 <MaterialCommunityIcons name="radar" size={22} color="#000" />
