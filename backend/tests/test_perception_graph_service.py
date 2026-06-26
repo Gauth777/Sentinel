@@ -120,6 +120,8 @@ class FakeSession:
 
     async def run(self, query, **params):
         self.queries.append((query, params))
+        if "CONSTRAINT" in query.upper() and getattr(self.driver, "_fail_constraints", False):
+            raise RuntimeError("Fake constraint failure")
         return FakeResult(self._records)
 
 
@@ -128,6 +130,7 @@ class FakeNeo4jDriver:
         self.closed = False
         self.sessions = []
         self._next_result = []
+        self._fail_constraints = False
 
     def session(self, database=None):
         sess = FakeSession(self, self._next_result)
@@ -137,6 +140,9 @@ class FakeNeo4jDriver:
 
     def set_next_result(self, records):
         self._next_result = records
+
+    def fail_constraints(self, fail=True):
+        self._fail_constraints = fail
 
     async def verify_connectivity(self):
         pass
@@ -475,20 +481,23 @@ async def test_no_credential_leakage(monkeypatch, fake_neo4j_module):
 
 @pytest.mark.anyio
 async def test_memory_neo4j_schema_parity(fake_neo4j_module, monkeypatch, clear_neo4j_env):
+    # Build genuine memory graph
+    memory_service = PerceptionGraphService()
+    await memory_service.initialize()
+    await memory_service.record_observation(
+        "obs-1", "v-A", "A", "hz-1", "pothole", "Pothole", "seg-gst", "GST", 1000.0
+    )
+    memory_graph = await memory_service.build_graph(hazard_id="hz-1")
+
+    # Build genuine fake-Neo4j graph
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
 
-    svc = PerceptionGraphService()
-    await svc.initialize()
+    neo4j_service = PerceptionGraphService()
+    await neo4j_service.initialize()
+    assert neo4j_service._mode == "neo4j"
 
-    await svc.record_observation(
-        "obs-1", "v-A", "A", "hz-1", "pothole", "Pothole", "seg-gst", "GST", 1000.0
-    )
-    memory_graph = await svc.build_graph(hazard_id="hz-1")
-    svc._mode = "neo4j"
-
-    # Build fake data for Neo4j backend
     v_node = FakeNode("v-A", ["SentinelPerception", "Vehicle"], label="A")
     obs_node = FakeNode("obs-1", ["SentinelPerception", "Observation"], label="Observation obs-1", type="pothole", timestamp=1000.0)
     h_node = FakeNode("hz-1", ["SentinelPerception", "Hazard"], label="Pothole", type="pothole", sourceCount=1, confidence=60)
@@ -504,10 +513,9 @@ async def test_memory_neo4j_schema_parity(fake_neo4j_module, monkeypatch, clear_
         "edges": [obs_rel, sup_rel, onr_rel, app_rel],
     })
 
-    fake_driver = svc._neo4j._driver
+    fake_driver = neo4j_service._neo4j._driver
     fake_driver.set_next_result([record])
-    neo4j_graph = await svc.build_graph(hazard_id="hz-1")
-    svc._mode = "memory"
+    neo4j_graph = await neo4j_service.build_graph(hazard_id="hz-1")
 
     required_keys = {
         "mode",
@@ -549,7 +557,8 @@ async def test_memory_neo4j_schema_parity(fake_neo4j_module, monkeypatch, clear_
     for item in memory_graph["timeline"]:
         assert set(item.keys()) == {"eventId", "timestamp", "type", "description"}
 
-    await svc.close()
+    await memory_service.close()
+    await neo4j_service.close()
 
 
 # ---------------------------------------------------------------------------
@@ -729,11 +738,11 @@ async def test_constraints_attempted(fake_neo4j_module, monkeypatch, clear_neo4j
             if "CONSTRAINT" in query.upper():
                 constraint_queries.append(query)
 
-    assert len(constraint_queries) >= 1
+    assert len(constraint_queries) == 5
     for q in constraint_queries:
-        assert "SentinelPerception" in q
-        assert "REQUIRE" in q
+        assert "REQUIRE (n.scenario_id, n.id) IS UNIQUE" in q
         assert "IS UNIQUE" in q
+        assert ":SentinelPerception" not in q
 
     await svc.close()
 
@@ -767,6 +776,33 @@ async def test_scoped_reset_query(fake_neo4j_module, monkeypatch, clear_neo4j_en
     assert "scenario_id" in query
     assert "MATCH (n) DETACH DELETE n" not in query
     assert params.get("scenario_id") == SCENARIO_ID
+
+    await svc.close()
+
+
+# ---------------------------------------------------------------------------
+# NEW: constraint failure triggers clean memory fallback, no credential leak
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_constraint_failure_fallback(fake_neo4j_module, monkeypatch, clear_neo4j_env, caplog):
+    monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
+    monkeypatch.setenv("NEO4J_USERNAME", "user")
+    monkeypatch.setenv("NEO4J_PASSWORD", "pass")
+
+    failing_driver = FakeNeo4jDriver()
+    failing_driver.fail_constraints(True)
+    monkeypatch.setattr(fake_neo4j_module.AsyncGraphDatabase, "driver", lambda uri, auth=None: failing_driver)
+
+    svc = PerceptionGraphService()
+    await svc.initialize()
+    assert svc._mode == "memory"
+
+    # Ensure no credentials leaked in logs or exceptions
+    for record in caplog.records:
+        log_text = record.message
+        assert "bolt://fake:7687" not in log_text
+        assert "pass" not in log_text.lower()
 
     await svc.close()
 

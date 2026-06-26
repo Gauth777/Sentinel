@@ -96,7 +96,7 @@ def _normalize_response(
         ts = 0.0
         desc = ""
         if e["type"] == "OBSERVED":
-            ts = nodes.get(e["source"], {}).get("properties", {}).get("timestamp", 0.0)
+            ts = nodes.get(e["target"], {}).get("properties", {}).get("timestamp", 0.0)
             desc = f"Vehicle {e['source']} observed {e['target']}"
         elif e["type"] == "SUPPORTS":
             ts = nodes.get(e["source"], {}).get("properties", {}).get("timestamp", 0.0)
@@ -507,18 +507,27 @@ class _Neo4jGraphBackend:
         if self._driver is None:
             return
         constraints = [
-            "CREATE CONSTRAINT sentinel_vehicle_id IF NOT EXISTS FOR (v:SentinelPerception:Vehicle) REQUIRE v.id IS UNIQUE",
-            "CREATE CONSTRAINT sentinel_observation_id IF NOT EXISTS FOR (o:SentinelPerception:Observation) REQUIRE o.id IS UNIQUE",
-            "CREATE CONSTRAINT sentinel_hazard_id IF NOT EXISTS FOR (h:SentinelPerception:Hazard) REQUIRE h.id IS UNIQUE",
-            "CREATE CONSTRAINT sentinel_roadsegment_id IF NOT EXISTS FOR (r:SentinelPerception:RoadSegment) REQUIRE r.id IS UNIQUE",
-            "CREATE CONSTRAINT sentinel_warning_id IF NOT EXISTS FOR (w:SentinelPerception:Warning) REQUIRE w.id IS UNIQUE",
+            ("sentinel_vehicle_identity", "Vehicle"),
+            ("sentinel_observation_identity", "Observation"),
+            ("sentinel_hazard_identity", "Hazard"),
+            ("sentinel_roadsegment_identity", "RoadSegment"),
+            ("sentinel_warning_identity", "Warning"),
         ]
         async with self._driver.session(database=self._database) as session:
-            for cypher in constraints:
+            for name, label in constraints:
+                cypher = (
+                    f"CREATE CONSTRAINT {name} IF NOT EXISTS "
+                    f"FOR (n:{label}) REQUIRE (n.scenario_id, n.id) IS UNIQUE"
+                )
                 try:
                     await session.run(cypher)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        f"Constraint {name} creation failed: {type(exc).__name__}"
+                    )
+                    raise RuntimeError(
+                        f"Neo4j constraint failed: {name}"
+                    ) from None
 
     async def _run(self, query: str, **params) -> None:
         if self._driver is None:
