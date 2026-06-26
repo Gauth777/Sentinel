@@ -39,6 +39,10 @@ else:
     client = DummyClient()
 
 
+from services.perception_graph_service import PerceptionGraphService
+_perception_graph = PerceptionGraphService()
+
+
 # ======================= Models =======================
 class GeoPoint(BaseModel):
     latitude: float
@@ -437,7 +441,9 @@ async def ensure_seed() -> None:
 # ======================= App =======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await _perception_graph.initialize()
     yield
+    await _perception_graph.close()
     client.close()
 
 
@@ -636,11 +642,33 @@ async def demo_observation(req: DemoObservationRequest):
 async def demo_reset():
     from services.neo4j_service import Neo4jService
     await Neo4jService.reset_demo_data()
+    try:
+        await _perception_graph.reset_demo_data()
+    except Exception as e:
+        logger.warning(f"PerceptionGraphService reset failed: {e}")
     await db.hazards.delete_many({})
     await db.observations.delete_many({})
     await db.sentinel_meta.delete_many({})
     await ensure_seed()
     return {"message": "Demo data reset successfully"}
+
+
+@api_router.get("/sentinel/perception-graph")
+async def get_perception_graph(
+    hazard_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=25),
+):
+    """Return the perception provenance graph for Sentinel hazards.
+
+    Query parameters:
+      - hazard_id: optional focused hazard ID
+      - limit: maximum number of hazard roots (1-100, default 25)
+    """
+    try:
+        graph = await _perception_graph.build_graph(hazard_id=hazard_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return graph
 
 
 app.include_router(api_router)
