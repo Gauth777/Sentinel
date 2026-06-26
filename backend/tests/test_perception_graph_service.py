@@ -797,6 +797,12 @@ async def test_constraint_failure_fallback(fake_neo4j_module, monkeypatch, clear
     svc = PerceptionGraphService()
     await svc.initialize()
     assert svc._mode == "memory"
+    assert svc._neo4j._driver is None
+
+    await svc.initialize()
+
+    assert svc._mode == "memory"
+    assert svc._neo4j._driver is None
 
     # Ensure no credentials leaked in logs or exceptions
     for record in caplog.records:

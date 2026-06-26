@@ -491,9 +491,24 @@ class _Neo4jGraphBackend:
             )
             await self._driver.verify_connectivity()
             await self._create_constraints()
-        except Exception as e:
-            logger.warning(f"Neo4j initialization failed: {type(e).__name__}")
-            raise RuntimeError(f"Neo4j connection failed: {type(e).__name__}") from None
+        except Exception as exc:
+            logger.warning(
+                "Neo4j initialization failed: %s",
+                type(exc).__name__,
+            )
+
+            driver = self._driver
+            self._driver = None
+
+            if driver is not None:
+                try:
+                    await driver.close()
+                except Exception:
+                    pass
+
+            raise RuntimeError(
+                f"Neo4j initialization failed: {type(exc).__name__}"
+            ) from None
 
     async def close(self) -> None:
         if self._driver is not None:
