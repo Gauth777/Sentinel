@@ -22,6 +22,7 @@ import WorldMap from "@/src/components/ghost-vision/WorldMap";
 import HazardBottomSheet from "@/src/components/ghost-vision/HazardBottomSheet";
 import MapLegend from "@/src/components/ghost-vision/MapLegend";
 import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
+import PerceptionGraphPanel from "@/src/components/ghost-vision/PerceptionGraphPanel";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
 import type { Hazard } from "@/src/types/sentinel";
 import { api } from "@/src/api/sentinel";
@@ -53,6 +54,7 @@ export default function GhostVisionScreen() {
 
   const [selectedLanguage, setSelectedLanguage] = useState<"en" | "hi" | "hinglish">("en");
   const [role, setRole] = useState<"approaching" | "observer">("approaching");
+  const [graphRefreshKey, setGraphRefreshKey] = useState(0);
 
   const showActionFlash = useCallback((message: string | null, durationMs?: number) => {
     if (actionFlashTimer.current) {
@@ -152,6 +154,7 @@ export default function GhostVisionScreen() {
             };
       await api.submitObservation(obs);
       await refetch(true);
+      setGraphRefreshKey((k) => k + 1);
 
       showActionFlash(
         loc.mode === "live"
@@ -173,6 +176,7 @@ export default function GhostVisionScreen() {
       showActionFlash("Demo reset", 1800);
       await refetch(true);
       setActiveHazardId(null);
+      setGraphRefreshKey((k) => k + 1);
     } catch (err) {
       console.error("Failed to reset demo:", err);
       showActionFlash("Reset Failed", 1800);
@@ -525,6 +529,14 @@ export default function GhostVisionScreen() {
                 Haptics.selectionAsync().catch(() => {});
                 setCardExpanded((e) => !e);
               }}
+            />
+          )}
+
+          {/* === Perception Provenance Panel === */}
+          {active && (
+            <PerceptionGraphPanel
+              hazardId={active.id}
+              refreshKey={graphRefreshKey}
             />
           )}
         </ScrollView>

@@ -8,6 +8,7 @@ import type {
   Hazard,
   NearbyVehicle,
   WorldModel,
+  PerceptionGraphResponse,
 } from "@/src/types/sentinel";
 
 export type WorldModelParams = {
@@ -84,6 +85,13 @@ export const api = {
       "/sentinel/demo/reset",
       { method: "POST" }
     ),
+  perceptionGraph: (hazardId?: string, limit?: number) => {
+    const query = new URLSearchParams();
+    if (hazardId) query.set("hazard_id", hazardId);
+    if (typeof limit === "number") query.set("limit", String(limit));
+    const qs = query.toString();
+    return j<PerceptionGraphResponse>(`/sentinel/perception-graph${qs ? `?${qs}` : ""}`);
+  },
 };
 
 // Re-export types for legacy imports

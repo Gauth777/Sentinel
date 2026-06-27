@@ -66,6 +66,58 @@ export type Hazard = {
   reportedIncorrect: number;
 };
 
+export type GraphNode = {
+  id: string;
+  type: "Vehicle" | "Observation" | "Hazard" | "RoadSegment" | "Warning";
+  label: string;
+  scenarioId: string;
+  properties: Record<string, any>;
+};
+
+export type GraphEdge = {
+  id: string;
+  type: "OBSERVED" | "SUPPORTS" | "ON_ROAD" | "APPROACHING" | "TRIGGERED_WARNING" | "DELIVERED_TO";
+  source: string;
+  target: string;
+  scenarioId: string;
+  properties: Record<string, any>;
+};
+
+export type GraphSummaryFocus = {
+  hazardId: string;
+  sourceCount: number;
+  confidence: number;
+  warningCount: number;
+} | null;
+
+export type GraphSummary = {
+  nodeCount: number;
+  edgeCount: number;
+  vehicleCount: number;
+  observationCount: number;
+  hazardCount: number;
+  roadSegmentCount: number;
+  warningCount: number;
+  focus: GraphSummaryFocus;
+};
+
+export type GraphTimelineEvent = {
+  eventId: string;
+  timestamp: number;
+  type: string;
+  description: string;
+};
+
+export type PerceptionGraphResponse = {
+  mode: "memory" | "neo4j";
+  generatedAt: string;
+  focusHazardId: string | null;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  summary: GraphSummary;
+  timeline: GraphTimelineEvent[];
+};
+
 export type WorldModel = {
   scenarioId: string;
   telemetrySource: TelemetrySource;
