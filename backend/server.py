@@ -442,9 +442,11 @@ async def ensure_seed() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _perception_graph.initialize()
-    yield
-    await _perception_graph.close()
-    client.close()
+    try:
+        yield
+    finally:
+        await _perception_graph.close()
+        client.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -640,12 +642,10 @@ async def demo_observation(req: DemoObservationRequest):
 
 @api_router.post("/sentinel/demo/reset")
 async def demo_reset():
-    from services.neo4j_service import Neo4jService
-    await Neo4jService.reset_demo_data()
     try:
         await _perception_graph.reset_demo_data()
     except Exception as e:
-        logger.warning(f"PerceptionGraphService reset failed: {e}")
+        logger.warning(f"PerceptionGraphService reset failed: {type(e).__name__}")
     await db.hazards.delete_many({})
     await db.observations.delete_many({})
     await db.sentinel_meta.delete_many({})

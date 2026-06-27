@@ -10,14 +10,21 @@ Run full regression:
 import os
 import sys
 
+# Force test isolation before any server import
+os.environ["MONGO_URL"] = "mongodb://127.0.0.1:1"
+os.environ["DB_NAME"] = "sentinel_test_integration"
+os.environ["NEO4J_ENABLED"] = "false"
+os.environ["NEO4J_URI"] = ""
+os.environ["NEO4J_USERNAME"] = ""
+os.environ["NEO4J_PASSWORD"] = ""
+
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 import pytest
 from fastapi.testclient import TestClient
-from server import app, db, MONGO_REACHABLE, mongo_url
-from utils.mongo_mock import MOCK_SYNC_DB_STATE
+from server import app
 
 
 @pytest.fixture
@@ -27,25 +34,9 @@ def anyio_backend():
 
 @pytest.fixture(scope="module")
 def client():
-    # Ensure no real Neo4j connection during tests
-    for key in list(os.environ.keys()):
-        if key.startswith("NEO4J_"):
-            os.environ.pop(key, None)
     with TestClient(app) as c:
         c.post("/api/sentinel/demo/reset")
         yield c
-
-
-@pytest.fixture(scope="module")
-def sync_db():
-    if MONGO_REACHABLE:
-        from pymongo import MongoClient
-        c = MongoClient(mongo_url)
-        c.drop_database("test_sentinel_db")
-        yield c["test_sentinel_db"]
-        c.close()
-    else:
-        yield MOCK_SYNC_DB_STATE
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +266,22 @@ async def test_perception_graph_non_fatal():
                 r = c.post("/api/sentinel/demo/observation", json=obs)
                 assert r.status_code == 200
                 assert r.json()["type"] == "pothole"
+
+
+# ---------------------------------------------------------------------------
+# Demo reset does not invoke legacy Neo4jService.reset_demo_data
+# ---------------------------------------------------------------------------
+
+def test_demo_reset_does_not_call_legacy_neo4j(monkeypatch):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from server import app
+
+    def raise_if_called(*args, **kwargs):
+        raise AssertionError("Neo4jService.reset_demo_data was called")
+
+    with patch("services.neo4j_service.Neo4jService.reset_demo_data", raise_if_called):
+        with TestClient(app) as c:
+            r = c.post("/api/sentinel/demo/reset")
+            assert r.status_code == 200
+            assert r.json()["message"] == "Demo data reset successfully"
