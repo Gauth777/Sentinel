@@ -2,10 +2,13 @@ import os
 import math
 import uuid
 import time
+import logging
 from typing import Dict, List, Optional
 from services.neo4j_service import Neo4jService
 from services.warning_service import WarningService
 from utils.geo import haversine_meters
+
+logger = logging.getLogger(__name__)
 
 # Workflow Settings
 MATCH_RADIUS_METERS = 50.0
@@ -209,6 +212,23 @@ class LocalWorkflowRunner(WorkflowRunner):
             upsert=True
         )
 
+        # 6b. Record provenance in the perception graph (secondary, non-fatal)
+        try:
+            from server import _perception_graph
+            await _perception_graph.record_observation(
+                observation_id=obs_id,
+                vehicle_id=source_vehicle_id,
+                vehicle_label=vehicle_label,
+                hazard_id=hazard_id,
+                hazard_type=obs_type,
+                hazard_label=result_hazard["label"],
+                road_segment_id=best_road_id,
+                road_segment_name="GST Road Northbound" if best_road_id == "gst" else "Velachery Link Rd" if best_road_id == "side" else "Service Rd",
+                timestamp=current_time,
+            )
+        except Exception as e:
+            logger.warning(f"PerceptionGraphService record_observation failed: {e}")
+
         # 7. Record Graph Relationships in Neo4j (and its fallback)
         try:
             # Merge vehicle
@@ -247,6 +267,21 @@ class LocalWorkflowRunner(WorkflowRunner):
                     # Create WarningEvent
                     warning_text = result_hazard["warnings"]["en"]
                     warning_id = f"wrn-{obs_id}-{v_id}"
+                    
+                    # 8b. Record warning in the perception graph (secondary, non-fatal)
+                    try:
+                        from server import _perception_graph
+                        await _perception_graph.record_warning(
+                            warning_id=warning_id,
+                            hazard_id=hazard_id,
+                            vehicle_id=v_id,
+                            warning_text=warning_text,
+                            language="en",
+                            road_segment_id=best_road_id,
+                            timestamp=current_time,
+                        )
+                    except Exception as e:
+                        logger.warning(f"PerceptionGraphService record_warning failed: {e}")
                     
                     # Store WarningEvent node & relationships
                     await Neo4jService.record_warning_event(
