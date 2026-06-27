@@ -118,6 +118,7 @@
     "MuteAlert": "light",
     "HazardDetectedPulse": "warning"
   },
+  
   "instructions_to_main_agent": [
     "Strictly follow the Dark-First Utility DARK guidelines. Do not use generic indigo/purple/blue templates. The primary accent is #00F0FF (Cool Cyan) and secondary is #3399FF (Electric Blue).",
     "Ensure touch targets are at least 48x48dp for all bottom action buttons (Confirm, Report, Mute).",
