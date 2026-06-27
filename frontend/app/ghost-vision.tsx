@@ -152,8 +152,11 @@ export default function GhostVisionScreen() {
               sourceVehicleId: "v-1",
               vehicleLabel: "Sentinel-A8"
             };
-      await api.submitObservation(obs);
+      const returnedHazard = await api.submitObservation(obs);
       await refetch(true);
+      if (returnedHazard?.id) {
+        setActiveHazardId(returnedHazard.id);
+      }
       setGraphRefreshKey((k) => k + 1);
 
       showActionFlash(

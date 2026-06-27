@@ -76,7 +76,7 @@ export const api = {
       { method: "POST" }
     ),
   submitObservation: (obs: any) =>
-    j<any>(
+    j<Hazard>(
       "/sentinel/demo/observation",
       { method: "POST", body: JSON.stringify(obs) }
     ),

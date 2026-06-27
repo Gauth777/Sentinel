@@ -57,8 +57,14 @@ export default function PerceptionGraphPanel({ hazardId, refreshKey = 0 }: Props
   }, [data, hazardId]);
 
   const recentTimeline = useMemo(() => {
-    if (!data) return [];
-    return data.timeline.slice(0, 5);
+    if (!data || data.timeline.length === 0) return [];
+    const sorted = [...data.timeline].sort((a, b) => b.timestamp - a.timestamp);
+    return sorted.slice(0, 5);
+  }, [data]);
+
+  const isEmpty = useMemo(() => {
+    if (!data) return false;
+    return data.nodes.length === 0 || data.summary.nodeCount === 0;
   }, [data]);
 
   const modeLabel = data?.mode === "neo4j" ? "NEO4J" : "MEMORY";
@@ -115,13 +121,13 @@ export default function PerceptionGraphPanel({ hazardId, refreshKey = 0 }: Props
             </View>
           )}
 
-          {!loading && !error && !data && (
+          {!loading && !error && isEmpty && (
             <View style={styles.centered}>
               <Text style={styles.emptyText}>No provenance data available</Text>
             </View>
           )}
 
-          {!loading && !error && data && (
+          {!loading && !error && !isEmpty && data && (
             <>
               {/* Summary */}
               <View style={styles.summaryBlock} testID="perception-graph-summary">
@@ -153,18 +159,18 @@ export default function PerceptionGraphPanel({ hazardId, refreshKey = 0 }: Props
               {chain && (
                 <View style={styles.chainBlock} testID="perception-graph-chain">
                   <Text style={styles.sectionTitle}>PROVENANCE CHAIN</Text>
-                  {chain.stages.map((stage, i) => (
-                    <View key={stage.node.id + i}>
-                      <StageCard node={stage.node} />
-                      {stage.relLabel && (
-                        <View style={styles.relRow}>
+                  {chain.steps.map((step, i) => {
+                    if (step.kind === "rel") {
+                      return (
+                        <View key={`rel-${i}`} style={styles.relRow}>
                           <View style={styles.relLine} />
-                          <Text style={styles.relLabel}>{stage.relLabel}</Text>
+                          <Text style={styles.relLabel}>{step.label}</Text>
                           <View style={styles.relLine} />
                         </View>
-                      )}
-                    </View>
-                  ))}
+                      );
+                    }
+                    return <StageCard key={`node-${step.node.id}-${i}`} node={step.node} />;
+                  })}
                 </View>
               )}
 
@@ -197,16 +203,15 @@ export default function PerceptionGraphPanel({ hazardId, refreshKey = 0 }: Props
 // Helpers
 // ---------------------------------------------------------------------------
 
-type ChainStage = {
-  node: GraphNode;
-  relLabel?: string;
-};
+type ChainStep =
+  | { kind: "node"; node: GraphNode }
+  | { kind: "rel"; label: string };
 
 function buildChain(
   nodes: GraphNode[],
   edges: GraphEdge[],
   hazardId: string
-): { stages: ChainStage[] } | null {
+): { steps: ChainStep[] } | null {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
   const outEdges = new Map<string, GraphEdge[]>();
   const inEdges = new Map<string, GraphEdge[]>();
@@ -218,9 +223,9 @@ function buildChain(
   const hazard = nodeMap.get(hazardId);
   if (!hazard) return null;
 
-  const stages: ChainStage[] = [];
+  const steps: ChainStep[] = [];
 
-  // Observer vehicle → Observation → Hazard
+  // Observer vehicle → OBSERVED → Observation → SUPPORTS → Hazard
   const obsEdges = inEdges.get(hazardId)?.filter((e) => e.type === "SUPPORTS") ?? [];
   const primaryObs = obsEdges[0];
   if (primaryObs) {
@@ -230,35 +235,42 @@ function buildChain(
       if (obsFromVehicle) {
         const vehicleNode = nodeMap.get(obsFromVehicle.source);
         if (vehicleNode) {
-          stages.push({ node: vehicleNode });
-          stages.push({ node: obsNode, relLabel: "OBSERVED" });
-          stages.push({ node: hazard, relLabel: "SUPPORTS" });
+          steps.push({ kind: "node", node: vehicleNode });
+          steps.push({ kind: "rel", label: "OBSERVED" });
+          steps.push({ kind: "node", node: obsNode });
+          steps.push({ kind: "rel", label: "SUPPORTS" });
+          steps.push({ kind: "node", node: hazard });
         }
       }
     }
   }
 
-  if (stages.length === 0) {
-    stages.push({ node: hazard });
+  if (steps.length === 0) {
+    steps.push({ kind: "node", node: hazard });
   }
 
-  // Hazard → Warning → Recipient Vehicle
+  // Hazard → TRIGGERED_WARNING → Warning → DELIVERED_TO → Recipient Vehicle (one deterministic path)
   const warningEdges = outEdges.get(hazardId)?.filter((e) => e.type === "TRIGGERED_WARNING") ?? [];
-  for (const we of warningEdges) {
+  if (warningEdges.length > 0) {
+    const we = warningEdges[0];
     const warningNode = nodeMap.get(we.target);
-    if (!warningNode) continue;
-    stages.push({ node: warningNode, relLabel: "TRIGGERED_WARNING" });
+    if (warningNode) {
+      steps.push({ kind: "rel", label: "TRIGGERED_WARNING" });
+      steps.push({ kind: "node", node: warningNode });
 
-    const deliveredEdges = outEdges.get(warningNode.id)?.filter((e) => e.type === "DELIVERED_TO") ?? [];
-    for (const de of deliveredEdges) {
-      const recipientNode = nodeMap.get(de.target);
-      if (recipientNode) {
-        stages.push({ node: recipientNode, relLabel: "DELIVERED_TO" });
+      const deliveredEdges = outEdges.get(warningNode.id)?.filter((e) => e.type === "DELIVERED_TO") ?? [];
+      if (deliveredEdges.length > 0) {
+        const de = deliveredEdges[0];
+        const recipientNode = nodeMap.get(de.target);
+        if (recipientNode) {
+          steps.push({ kind: "rel", label: "DELIVERED_TO" });
+          steps.push({ kind: "node", node: recipientNode });
+        }
       }
     }
   }
 
-  return { stages };
+  return { steps };
 }
 
 function StageCard({ node }: { node: GraphNode }) {
