@@ -25,6 +25,8 @@ import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
 import type { Hazard } from "@/src/types/sentinel";
 import { api } from "@/src/api/sentinel";
+import { trainingApi } from "@/src/api/trainingSamples";
+import { buildDemoTrainingSample } from "@/src/utils/demoTrainingSample";
 import { buildLiveObservation } from "@/src/utils/ghostVisionLive";
 
 // process.env.EXPO_PUBLIC_MAP_STYLE_URL is reserved for the native MapLibre adapter
@@ -126,6 +128,7 @@ export default function GhostVisionScreen() {
   const onSubmitObservation = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     showActionFlash("Sharing observation…");
+    let hazard: Hazard | null = null;
     try {
       const obs =
         loc.mode === "live" && loc.location
@@ -150,20 +153,49 @@ export default function GhostVisionScreen() {
               sourceVehicleId: "v-1",
               vehicleLabel: "Sentinel-A8"
             };
-      await api.submitObservation(obs);
+      const result = await api.submitObservation(obs);
       await refetch(true);
+      hazard = result as Hazard | null;
+
+      // Attempt dataset creation separately — must not break observation success
+      let datasetMsg = "";
+      if (trainingApi.hasBackend() && hazard) {
+        try {
+          const payload = buildDemoTrainingSample({
+            observationId: obs.id,
+            hazardId: hazard.id ?? obs.id,
+            sourceVehicleId: obs.sourceVehicleId,
+            location: obs.location,
+            headingDegrees: loc.headingDegrees,
+            speedKmh: loc.speedKmh,
+            roadName: status?.road_name,
+            routeDirection: undefined,
+            telemetryMode: loc.mode === "live" ? "live" : "demo",
+          });
+          await trainingApi.createTrainingSample(payload);
+          datasetMsg = " · training sample queued";
+        } catch (err: any) {
+          const status = (err as any)?.status;
+          if (status === 409) {
+            datasetMsg = " · training sample already queued";
+          } else {
+            console.warn("[Sentinel] dataset creation failed:", err?.message ?? err);
+            datasetMsg = " · dataset queue unavailable";
+          }
+        }
+      }
 
       showActionFlash(
-        loc.mode === "live"
+        (loc.mode === "live"
           ? "Live hazard shared with approaching vehicles"
-          : "Observation shared with approaching vehicles",
-        2200
+          : "Observation shared with approaching vehicles") + datasetMsg,
+        2600
       );
     } catch (err: any) {
       console.error("Failed to submit observation:", err);
       showActionFlash("Submission Failed", 1800);
     }
-  }, [loc.headingDegrees, loc.location, loc.mode, refetch, showActionFlash]);
+  }, [loc.headingDegrees, loc.location, loc.mode, loc.speedKmh, refetch, showActionFlash, status?.road_name]);
 
   const onResetDemo = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
@@ -432,6 +464,18 @@ export default function GhostVisionScreen() {
                 >
                   <MaterialCommunityIcons name="plus-circle-outline" size={18} color="#000" />
                   <Text style={styles.submitObsBtnText}>Submit Demo Observation</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    Haptics.selectionAsync().catch(() => {});
+                    router.push("/training-data");
+                  }}
+                  style={({ pressed }) => [styles.datasetLabBtn, pressed && { opacity: 0.85 }]}
+                  testID="training-data-link"
+                  android_ripple={{ color: "#003844" }}
+                >
+                  <MaterialCommunityIcons name="test-tube" size={14} color={colors.brand} />
+                  <Text style={styles.datasetLabBtnText}>DATASET LAB</Text>
                 </Pressable>
                 <Text style={styles.observerHint}>
                   Observer vehicle Sentinel-A8 observes a hazard and submits it to the graph model.
@@ -1010,6 +1054,24 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "500",
     letterSpacing: 0.5,
+  },
+  datasetLabBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(0,240,255,0.06)",
+    borderWidth: 1,
+    borderColor: colors.brand + "59",
+  },
+  datasetLabBtnText: {
+    color: colors.brand,
+    fontSize: 12,
+    fontWeight: "600",
+    letterSpacing: 1,
   },
   langSelectorRow: {
     flexDirection: "row",
