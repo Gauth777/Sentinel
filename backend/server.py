@@ -43,6 +43,10 @@ from services.perception_graph_service import PerceptionGraphService
 _perception_graph = PerceptionGraphService()
 
 
+from services.training_sample_service import TrainingSampleService
+_training_samples = TrainingSampleService(db, MONGO_REACHABLE)
+
+
 # ======================= Models =======================
 class GeoPoint(BaseModel):
     latitude: float
@@ -442,6 +446,7 @@ async def ensure_seed() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _perception_graph.initialize()
+    await _training_samples.initialize()
     try:
         yield
     finally:
@@ -451,6 +456,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
+
+# Attach service references for route dependency injection
+app.state.training_sample_service = _training_samples
+
+
+from routes.training_samples import router as training_samples_router
+
+api_router.include_router(training_samples_router)
 
 
 @api_router.get("/")
