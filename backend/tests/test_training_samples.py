@@ -27,8 +27,10 @@ from models.training_samples import (
     RecommendedAction,
     DatasetStatus,
     FeedbackStatus,
+    FeedbackStatusInput,
     TrainingSampleCreate,
     TrainingFeedbackCreate,
+    TrainingSample,
     Context,
     GeoLocation,
     Media,
@@ -453,7 +455,7 @@ def test_rejected_sample_excluded_from_export(client):
     r = client.get("/api/sentinel/training-samples/export")
     assert r.status_code == 200
     lines = [l for l in r.text.strip().split("\n") if l.strip()]
-    assert all(json.loads(l)["sampleId"] != "ts-export-rejected" for l in lines)
+    assert all(json.loads(l)["sample_id"] != "ts-export-rejected" for l in lines)
 
 
 def test_pending_sample_excluded_from_export(client):
@@ -462,7 +464,7 @@ def test_pending_sample_excluded_from_export(client):
     r = client.get("/api/sentinel/training-samples/export")
     assert r.status_code == 200
     lines = [l for l in r.text.strip().split("\n") if l.strip()]
-    assert all(json.loads(l)["sampleId"] != "ts-export-pending" for l in lines)
+    assert all(json.loads(l)["sample_id"] != "ts-export-pending" for l in lines)
 
 
 def test_confirmed_sample_included_in_export(client):
@@ -472,7 +474,7 @@ def test_confirmed_sample_included_in_export(client):
     r = client.get("/api/sentinel/training-samples/export")
     assert r.status_code == 200
     lines = [l for l in r.text.strip().split("\n") if l.strip()]
-    assert any(json.loads(l)["sampleId"] == "ts-export-confirmed" for l in lines)
+    assert any(json.loads(l)["sample_id"] == "ts-export-confirmed" for l in lines)
 
 
 def test_corrected_sample_included_in_export(client):
@@ -485,7 +487,7 @@ def test_corrected_sample_included_in_export(client):
     r = client.get("/api/sentinel/training-samples/export")
     assert r.status_code == 200
     lines = [l for l in r.text.strip().split("\n") if l.strip()]
-    assert any(json.loads(l)["sampleId"] == "ts-export-corrected" for l in lines)
+    assert any(json.loads(l)["sample_id"] == "ts-export-corrected" for l in lines)
 
 
 def test_export_is_valid_ndjson(client):
@@ -633,6 +635,213 @@ def test_stats_distributions_use_verified_labels(client):
 
 
 # ------------------------------------------------------------------
+# Regression tests
+# ------------------------------------------------------------------
+
+def test_camelcase_roadtype_correction_accepted(client):
+    p = _sample_payload("ts-reg-camel-road")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-camel-road/feedback",
+        json={"status": "corrected", "correctedLabels": {"roadType": "highway"}},
+    )
+    assert r.status_code == 200
+    d = r.json()
+    assert d["finalVerifiedLabels"]["roadType"] == "highway"
+
+
+def test_camelcase_recommendedaction_correction_accepted(client):
+    p = _sample_payload("ts-reg-camel-action")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-camel-action/feedback",
+        json={"status": "corrected", "correctedLabels": {"recommendedAction": "yield"}},
+    )
+    assert r.status_code == 200
+    d = r.json()
+    assert d["finalVerifiedLabels"]["recommendedAction"] == "yield"
+
+
+def test_multiple_partial_corrections_merge_correctly(client):
+    p = _sample_payload("ts-reg-multi")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-multi/feedback",
+        json={"status": "corrected", "correctedLabels": {"roadType": "highway", "recommendedAction": "yield"}},
+    )
+    assert r.status_code == 200
+    d = r.json()
+    final = d["finalVerifiedLabels"]
+    assert final["roadType"] == "highway"
+    assert final["recommendedAction"] == "yield"
+    assert final["trafficDensity"] == "medium"
+    assert final["roadComplexity"] == "moderate"
+    assert final["hazardPresence"] == "yes"
+    assert final["anticipatedRisk"] == "high"
+
+
+def test_unknown_correction_field_returns_422(client):
+    p = _sample_payload("ts-reg-unknown")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-unknown/feedback",
+        json={"status": "corrected", "correctedLabels": {"roadType": "highway", "unknownField": "value"}},
+    )
+    assert r.status_code == 422
+
+
+def test_invalid_correction_enum_returns_422(client):
+    p = _sample_payload("ts-reg-invalid-enum")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-invalid-enum/feedback",
+        json={"status": "corrected", "correctedLabels": {"roadType": "intergalactic_highway"}},
+    )
+    assert r.status_code == 422
+
+
+def test_pending_feedback_status_returns_422(client):
+    p = _sample_payload("ts-reg-pending")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-pending/feedback",
+        json={"status": "pending"},
+    )
+    assert r.status_code == 422
+
+
+def test_final_verified_labels_exactly_six_fields(client):
+    p = _sample_payload("ts-reg-six-fields")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.post(
+        "/api/sentinel/training-samples/ts-reg-six-fields/feedback",
+        json={"status": "corrected", "correctedLabels": {"roadType": "highway"}},
+    )
+    d = r.json()
+    final = d["finalVerifiedLabels"]
+    assert set(final.keys()) == {
+        "roadType", "trafficDensity", "roadComplexity",
+        "hazardPresence", "anticipatedRisk", "recommendedAction",
+    }
+    assert "confidence" not in final
+    assert "perLabelConfidence" not in final
+    assert "rawResponse" not in final
+
+
+def test_jsonl_uses_snake_case_sample_id(client):
+    p = _sample_payload("ts-reg-snake")
+    client.post("/api/sentinel/training-samples", json=p)
+    client.post("/api/sentinel/training-samples/ts-reg-snake/feedback", json={"status": "confirmed"})
+    r = client.get("/api/sentinel/training-samples/export")
+    lines = [l for l in r.text.strip().split("\n") if l.strip()]
+    obj = json.loads(lines[0])
+    assert "sample_id" in obj
+    assert "sampleId" not in obj
+
+
+def test_api_uses_camelcase_sample_id(client):
+    p = _sample_payload("ts-reg-camel")
+    client.post("/api/sentinel/training-samples", json=p)
+    r = client.get("/api/sentinel/training-samples/ts-reg-camel")
+    d = r.json()
+    assert "sampleId" in d
+    assert "sample_id" not in d
+
+
+def test_memory_model_name_filtering_returns_expected_sample(client):
+    p = _sample_payload("ts-reg-model-filter")
+    client.post("/api/sentinel/training-samples", json=p)
+    client.post("/api/sentinel/training-samples/ts-reg-model-filter/feedback", json={"status": "confirmed"})
+    r = client.get("/api/sentinel/training-samples/export?model_name=sentinel-demo-baseline")
+    assert r.status_code == 200
+    lines = [l for l in r.text.strip().split("\n") if l.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert obj["sample_id"] == "ts-reg-model-filter"
+    assert obj["model"]["name"] == "sentinel-demo-baseline"
+
+
+def test_memory_road_type_export_filtering(client):
+    p = _sample_payload("ts-reg-road-filter")
+    p["prediction"]["roadType"] = "highway"
+    client.post("/api/sentinel/training-samples", json=p)
+    client.post("/api/sentinel/training-samples/ts-reg-road-filter/feedback", json={"status": "confirmed"})
+    r = client.get("/api/sentinel/training-samples/export?road_type=highway")
+    assert r.status_code == 200
+    lines = [l for l in r.text.strip().split("\n") if l.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert obj["final_verified_labels"]["road_type"] == "highway"
+
+
+def test_memory_hazard_presence_export_filtering(client):
+    p = _sample_payload("ts-reg-hazard-filter")
+    client.post("/api/sentinel/training-samples", json=p)
+    client.post("/api/sentinel/training-samples/ts-reg-hazard-filter/feedback", json={"status": "confirmed"})
+    r = client.get("/api/sentinel/training-samples/export?hazard_presence=yes")
+    assert r.status_code == 200
+    lines = [l for l in r.text.strip().split("\n") if l.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert obj["final_verified_labels"]["hazard_presence"] == "yes"
+
+
+def test_default_privacy_status_is_not_reviewed(client):
+    p = _sample_payload("ts-reg-privacy")
+    r = client.post("/api/sentinel/training-samples", json=p)
+    assert r.status_code == 201
+    d = r.json()
+    assert d["quality"]["privacyStatus"] == "not_reviewed"
+    assert d["quality"]["unusableReason"] is None
+    assert d["quality"]["notes"] is None
+
+
+@pytest.mark.anyio
+async def test_memory_concurrent_feedback_preserve_both_events():
+    store = _InMemoryTrainingStore()
+    svc = TrainingSampleService(store, False)
+    await svc.initialize()
+
+    p = TrainingSampleCreate(
+        sample_id="ts-concurrent-fb",
+        source_vehicle_id="v-1",
+        captured_at=datetime.now(timezone.utc),
+        context=Context(location=GeoLocation(latitude=12.0, longitude=80.0)),
+        media=Media(uri="demo://test"),
+        model=ModelInfo(provider="demo", name="test", version="1"),
+        prediction=PredictionLabels(
+            road_type=RoadType.urban_arterial,
+            traffic_density=TrafficDensity.low,
+            road_complexity=RoadComplexity.simple,
+            hazard_presence=HazardPresence.no,
+            anticipated_risk=AnticipatedRisk.low,
+            recommended_action=RecommendedAction.maintain_speed,
+        ),
+    )
+    await svc.create_sample(p)
+
+    fb1 = TrainingFeedbackCreate(status=FeedbackStatusInput.confirmed)
+    fb2 = TrainingFeedbackCreate(status=FeedbackStatusInput.rejected, note="changed")
+
+    async def submit(fb):
+        try:
+            return await svc.submit_feedback("ts-concurrent-fb", fb)
+        except Exception as e:
+            return str(e)
+
+    results = await asyncio.gather(submit(fb1), submit(fb2))
+    # Both should succeed; one will be first, the other second
+    assert all(isinstance(r, TrainingSample) for r in results)
+
+    # Verify the final state
+    final = await svc.get_sample("ts-concurrent-fb")
+    assert final is not None
+    assert len(final.feedback_history) == 2
+    # Revision should have been incremented twice (1 -> 3)
+    assert final.revision == 3
+
+
+# ------------------------------------------------------------------
 # Service-level direct tests
 # ------------------------------------------------------------------
 
@@ -684,11 +893,22 @@ async def test_memory_duplicate_concurrent_safety():
 # Integration with existing server routes (using actual server if available)
 # ------------------------------------------------------------------
 
-def test_existing_perception_graph_route_still_works():
-    # This test uses the actual server module if available
+def _safe_import_server():
+    """Import server with local-safe configuration to avoid production DBs."""
+    os.environ["MONGODB_URL"] = ""
+    os.environ["NEO4J_URI"] = ""
+    os.environ["NEO4J_USER"] = ""
+    os.environ["NEO4J_PASSWORD"] = ""
     try:
         from server import app as real_app
+        return real_app
     except ImportError:
+        return None
+
+
+def test_existing_perception_graph_route_still_works():
+    real_app = _safe_import_server()
+    if real_app is None:
         pytest.skip("server module not available in this test environment")
 
     with TestClient(real_app) as c:
@@ -699,9 +919,8 @@ def test_existing_perception_graph_route_still_works():
 
 
 def test_existing_demo_observation_route_still_works():
-    try:
-        from server import app as real_app
-    except ImportError:
+    real_app = _safe_import_server()
+    if real_app is None:
         pytest.skip("server module not available in this test environment")
 
     with TestClient(real_app) as c:
@@ -719,19 +938,14 @@ def test_existing_demo_observation_route_still_works():
         assert "id" in r.json()
 
 
-def test_training_sample_failure_does_not_break_observation():
-    # This is more of a design assertion: the observation route should not
-    # depend on training sample creation. We verify by checking the route still
-    # works even if the training service is unavailable.
-    try:
-        from server import app as real_app
-    except ImportError:
+def test_observation_route_independent_of_training_sample_service():
+    """Observation route works regardless of training sample service state."""
+    real_app = _safe_import_server()
+    if real_app is None:
         pytest.skip("server module not available in this test environment")
 
     with TestClient(real_app) as c:
         c.post("/api/sentinel/demo/reset")
-        # The observation route doesn't currently create training samples,
-        # but we verify it works independently.
         obs = {
             "id": "obs-independent-test",
             "type": "pothole",
