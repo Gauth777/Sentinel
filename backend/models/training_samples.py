@@ -71,6 +71,14 @@ class FeedbackStatus(str, Enum):
     rejected = "rejected"
 
 
+class FeedbackStatusInput(str, Enum):
+    """Allowed statuses for a feedback submission."""
+
+    confirmed = "confirmed"
+    corrected = "corrected"
+    rejected = "rejected"
+
+
 class TelemetrySource(str, Enum):
     demo = "demo"
     live = "live"
@@ -215,6 +223,41 @@ class PredictionLabels(BaseModel):
         return v
 
 
+class PartialPredictionLabels(BaseModel):
+    """Typed partial correction for feedback. Accepts camelCase aliases; stores snake_case."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=_to_camel,
+        extra="forbid",
+    )
+
+    road_type: Optional[RoadType] = None
+    traffic_density: Optional[TrafficDensity] = None
+    road_complexity: Optional[RoadComplexity] = None
+    hazard_presence: Optional[HazardPresence] = None
+    anticipated_risk: Optional[AnticipatedRisk] = None
+    recommended_action: Optional[RecommendedAction] = None
+
+    @model_validator(mode="after")
+    def _at_least_one_present(self) -> "PartialPredictionLabels":
+        fields = [
+            self.road_type,
+            self.traffic_density,
+            self.road_complexity,
+            self.hazard_presence,
+            self.anticipated_risk,
+            self.recommended_action,
+        ]
+        if not any(f is not None for f in fields):
+            raise ValueError("at least one corrected label must be provided")
+        return self
+
+    def to_correction_dict(self) -> Dict[str, Any]:
+        """Return a snake_case dict with only the non-None corrections."""
+        return self.model_dump(by_alias=False, exclude_none=True)
+
+
 class Provenance(BaseModel):
     model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
 
@@ -277,7 +320,7 @@ class TrainingSampleCreate(BaseModel):
     model: ModelInfo
     prediction: PredictionLabels
     provenance: Provenance = Provenance()
-    quality: Optional[QualityMetadata] = None
+    quality: Optional[QualityMetadata] = Field(default_factory=QualityMetadata)
 
     @field_validator("captured_at", mode="before")
     @classmethod
@@ -288,8 +331,8 @@ class TrainingSampleCreate(BaseModel):
 class TrainingFeedbackCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
 
-    status: FeedbackStatus
-    corrected_labels: Optional[Dict[str, Any]] = None
+    status: FeedbackStatusInput
+    corrected_labels: Optional[PartialPredictionLabels] = None
     submitted_by: Optional[str] = None
     submitted_at: Optional[datetime] = None
     note: Optional[str] = None
@@ -309,30 +352,19 @@ class TrainingFeedbackCreate(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _check_feedback_rules(self) -> TrainingFeedbackCreate:
+    def _check_feedback_rules(self) -> "TrainingFeedbackCreate":
         status = self.status
         corrections = self.corrected_labels
 
-        if status == FeedbackStatus.confirmed:
-            if corrections and any(v is not None for v in corrections.values()):
+        if status == FeedbackStatusInput.confirmed:
+            if corrections is not None:
                 raise ValueError("confirmed feedback must not contain corrected_labels")
-        elif status == FeedbackStatus.corrected:
-            if not corrections or not any(v is not None for v in corrections.values()):
+        elif status == FeedbackStatusInput.corrected:
+            if corrections is None:
                 raise ValueError("corrected feedback must contain at least one corrected label")
-            # Validate that corrected labels only contain valid enum values for canonical keys
-            allowed_keys = {
-                "road_type",
-                "traffic_density",
-                "road_complexity",
-                "hazard_presence",
-                "anticipated_risk",
-                "recommended_action",
-            }
-            for key in corrections:
-                if key not in allowed_keys:
-                    raise ValueError(f"corrected_labels contains invalid key: {key}")
-        elif status == FeedbackStatus.rejected:
-            if corrections and any(v is not None for v in corrections.values()):
+            # PartialPredictionLabels already validates non-empty and enum values
+        elif status == FeedbackStatusInput.rejected:
+            if corrections is not None:
                 raise ValueError("rejected feedback must not contain corrected_labels")
         return self
 

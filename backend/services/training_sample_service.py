@@ -7,13 +7,13 @@ import asyncio
 import logging
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from models.training_samples import (
     DatasetStatus,
     FeedbackEvent,
     FeedbackStatus,
-    FinalVerifiedLabels,
+    FeedbackStatusInput,
     TrainingFeedbackCreate,
     TrainingSample,
     TrainingSampleCreate,
@@ -36,6 +36,25 @@ class ServiceError(Exception):
     pass
 
 
+class ConcurrencyError(ServiceError):
+    """Raised when an optimistic-concurrency conflict occurs."""
+
+    pass
+
+
+def _get_nested(doc: dict, key: str) -> Any:
+    """Resolve dotted keys such as model.name or final_verified_labels.road_type."""
+    parts = key.split(".")
+    val = doc
+    for part in parts:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(part)
+        if val is None:
+            return None
+    return val
+
+
 class _InMemoryTrainingStore:
     """Thread-safe in-memory store with asyncio.Lock."""
 
@@ -48,7 +67,7 @@ class _InMemoryTrainingStore:
             for doc in self._samples.values():
                 match = True
                 for k, v in filter.items():
-                    if doc.get(k) != v:
+                    if _get_nested(doc, k) != v:
                         match = False
                         break
                 if match:
@@ -65,7 +84,7 @@ class _InMemoryTrainingStore:
             for doc in self._samples.values():
                 match = True
                 for k, v in filter.items():
-                    if doc.get(k) != v:
+                    if _get_nested(doc, k) != v:
                         match = False
                         break
                 if match:
@@ -87,7 +106,7 @@ class _InMemoryTrainingStore:
             for k, doc in self._samples.items():
                 match = True
                 for fk, fv in filter.items():
-                    if doc.get(fk) != fv:
+                    if _get_nested(doc, fk) != fv:
                         match = False
                         break
                 if match:
@@ -100,6 +119,23 @@ class _InMemoryTrainingStore:
                 return True
             return False
 
+    async def find_one_and_update(
+        self, filter: dict, update_fn: Callable[[dict], dict]
+    ) -> Optional[dict]:
+        """Atomically read, modify, and write a document under the store lock."""
+        async with self._lock:
+            for k, doc in self._samples.items():
+                match = True
+                for fk, fv in filter.items():
+                    if _get_nested(doc, fk) != fv:
+                        match = False
+                        break
+                if match:
+                    updated = update_fn(deepcopy(doc))
+                    self._samples[k] = updated
+                    return deepcopy(updated)
+            return None
+
     async def count_documents(self, filter: Optional[dict] = None) -> int:
         filter = filter or {}
         async with self._lock:
@@ -107,7 +143,7 @@ class _InMemoryTrainingStore:
             for doc in self._samples.values():
                 match = True
                 for k, v in filter.items():
-                    if doc.get(k) != v:
+                    if _get_nested(doc, k) != v:
                         match = False
                         break
                 if match:
@@ -120,7 +156,7 @@ class _InMemoryTrainingStore:
             for k, doc in self._samples.items():
                 match = True
                 for fk, fv in filter.items():
-                    if doc.get(fk) != fv:
+                    if _get_nested(doc, fk) != fv:
                         match = False
                         break
                 if match:
@@ -186,11 +222,14 @@ class TrainingSampleService:
         return pred.model_dump(by_alias=False)
 
     @staticmethod
-    def _merge_final_labels(original: dict, corrections: Optional[dict]) -> dict:
-        merged = dict(original)
+    def _merge_final_labels(original: dict, corrections: Optional[Dict[str, Any]]) -> dict:
+        merged = {k: v for k, v in original.items() if k in {
+            "road_type", "traffic_density", "road_complexity",
+            "hazard_presence", "anticipated_risk", "recommended_action",
+        }}
         if corrections:
             for k, v in corrections.items():
-                if v is not None:
+                if v is not None and k in merged:
                     merged[k] = v
         return merged
 
@@ -215,7 +254,7 @@ class TrainingSampleService:
             "original_prediction": pred_dict,
             "final_verified_labels": None,
             "provenance": data.provenance.model_dump(by_alias=False),
-            "quality": data.quality.model_dump(by_alias=False) if data.quality else None,
+            "quality": data.quality.model_dump(by_alias=False) if data.quality is not None else None,
             "dataset_status": DatasetStatus.pending.value,
             "feedback_status": FeedbackStatus.pending.value,
             "feedback_history": [],
@@ -234,7 +273,6 @@ class TrainingSampleService:
             raise
         except Exception as e:
             if self._mode == "mongo":
-                # Check for duplicate key error
                 if "duplicate" in str(e).lower() or "E11000" in str(e):
                     raise DuplicateError(f"sample_id '{data.sample_id}' already exists")
                 logger.error("MongoDB insert failed: %s", type(e).__name__)
@@ -288,7 +326,6 @@ class TrainingSampleService:
                 docs = await cursor.to_list(length=limit)
             else:
                 docs = await coll.find(query, {"_id": 0})
-                # Sort newest first by captured_at, then created_at
                 docs.sort(
                     key=lambda d: (d.get("captured_at", datetime.min), d.get("created_at", datetime.min)),
                     reverse=True,
@@ -315,73 +352,116 @@ class TrainingSampleService:
         self, sample_id: str, feedback: TrainingFeedbackCreate
     ) -> Optional[TrainingSample]:
         coll = self._collection()
-
-        # Fetch current document
-        try:
-            if self._mode == "mongo":
-                doc = await coll.find_one({"sample_id": sample_id}, {"_id": 0})
-            else:
-                doc = await coll.find_one({"sample_id": sample_id}, {"_id": 0})
-        except Exception as e:
-            logger.error("TrainingSampleService feedback fetch failed: %s", type(e).__name__)
-            raise ServiceError(f"Database operation failed: {type(e).__name__}")
-
-        if doc is None:
-            return None
-
         now = self._now()
         submitted_at = feedback.submitted_at or now
 
+        corrections_dict = None
+        if feedback.corrected_labels is not None:
+            corrections_dict = feedback.corrected_labels.to_correction_dict()
+
         event = {
             "status": feedback.status.value,
-            "corrected_labels": feedback.corrected_labels,
+            "corrected_labels": corrections_dict,
             "submitted_by": feedback.submitted_by,
             "submitted_at": submitted_at,
             "note": feedback.note,
         }
 
-        # Apply lifecycle rules
-        if feedback.status == FeedbackStatus.confirmed:
-            doc["dataset_status"] = DatasetStatus.verified.value
-            doc["feedback_status"] = FeedbackStatus.confirmed.value
-            doc["final_verified_labels"] = deepcopy(doc["original_prediction"])
-        elif feedback.status == FeedbackStatus.corrected:
-            doc["dataset_status"] = DatasetStatus.verified.value
-            doc["feedback_status"] = FeedbackStatus.corrected.value
-            merged = self._merge_final_labels(doc["original_prediction"], feedback.corrected_labels)
-            # Strip extra fields to ensure only canonical labels remain
-            canonical_keys = {
-                "road_type",
-                "traffic_density",
-                "road_complexity",
-                "hazard_presence",
-                "anticipated_risk",
-                "recommended_action",
+        # Determine lifecycle changes
+        if feedback.status == FeedbackStatusInput.confirmed:
+            new_dataset_status = DatasetStatus.verified.value
+            new_feedback_status = FeedbackStatus.confirmed.value
+            final_labels = deepcopy(coll.find_one({"sample_id": sample_id}, {"_id": 0}).get("original_prediction")) if self._mode == "mongo" else None
+        elif feedback.status == FeedbackStatusInput.corrected:
+            new_dataset_status = DatasetStatus.verified.value
+            new_feedback_status = FeedbackStatus.corrected.value
+            final_labels = None  # will be computed during update
+        else:  # rejected
+            new_dataset_status = DatasetStatus.rejected.value
+            new_feedback_status = FeedbackStatus.rejected.value
+            final_labels = None
+
+        # For memory mode: perform the entire read-modify-write under one lock
+        if self._mode == "memory":
+            def _update(doc: dict) -> dict:
+                if feedback.status == FeedbackStatusInput.confirmed:
+                    doc["final_verified_labels"] = self._merge_final_labels(doc["original_prediction"], {})
+                elif feedback.status == FeedbackStatusInput.corrected:
+                    doc["final_verified_labels"] = self._merge_final_labels(doc["original_prediction"], corrections_dict)
+                else:
+                    doc["final_verified_labels"] = None
+
+                doc["dataset_status"] = new_dataset_status
+                doc["feedback_status"] = new_feedback_status
+                history = doc.get("feedback_history", [])
+                history.append(event)
+                doc["feedback_history"] = history
+                doc["revision"] = doc.get("revision", 1) + 1
+                doc["updated_at"] = now
+                return doc
+
+            try:
+                updated_doc = await coll.find_one_and_update({"sample_id": sample_id}, _update)
+            except Exception as e:
+                logger.error("TrainingSampleService memory feedback failed: %s", type(e).__name__)
+                raise ServiceError(f"Database operation failed: {type(e).__name__}")
+            if updated_doc is None:
+                return None
+            return TrainingSample(**self._remove_id(updated_doc))
+
+        # For Mongo mode: use atomic find_one_and_update with $inc, $push, $set
+        if self._mode == "mongo":
+            from pymongo import ReturnDocument
+
+            # Build $set fields
+            set_fields: dict = {
+                "dataset_status": new_dataset_status,
+                "feedback_status": new_feedback_status,
+                "updated_at": now,
             }
-            doc["final_verified_labels"] = {k: merged[k] for k in canonical_keys if k in merged}
-        elif feedback.status == FeedbackStatus.rejected:
-            doc["dataset_status"] = DatasetStatus.rejected.value
-            doc["feedback_status"] = FeedbackStatus.rejected.value
-            doc["final_verified_labels"] = None
+            if feedback.status == FeedbackStatusInput.confirmed:
+                # We need the original_prediction from the doc to build final_verified_labels
+                # Because we can't reference fields in $set, we fetch first then compute
+                # But to keep atomic, we can do a two-step: fetch + atomic update with expected revision
+                # However, for simplicity and correctness, we'll use the two-step with revision guard
+                pass
 
-        # Append feedback event and bump revision
-        history = doc.get("feedback_history", [])
-        history.append(event)
-        doc["feedback_history"] = history
-        doc["revision"] = doc.get("revision", 1) + 1
-        doc["updated_at"] = now
+            # For Mongo, we'll do a fetch-compute-update with revision check for safety
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    doc = await coll.find_one({"sample_id": sample_id}, {"_id": 0})
+                    if doc is None:
+                        return None
 
-        # Persist
-        try:
-            if self._mode == "mongo":
-                await coll.replace_one({"sample_id": sample_id}, doc)
-            else:
-                await coll.replace_one({"sample_id": sample_id}, doc)
-        except Exception as e:
-            logger.error("TrainingSampleService feedback persist failed: %s", type(e).__name__)
-            raise ServiceError(f"Database operation failed: {type(e).__name__}")
+                    expected_revision = doc.get("revision", 1)
 
-        return TrainingSample(**self._remove_id(deepcopy(doc)))
+                    if feedback.status == FeedbackStatusInput.confirmed:
+                        set_fields["final_verified_labels"] = self._merge_final_labels(doc["original_prediction"], {})
+                    elif feedback.status == FeedbackStatusInput.corrected:
+                        set_fields["final_verified_labels"] = self._merge_final_labels(doc["original_prediction"], corrections_dict)
+                    else:
+                        set_fields["final_verified_labels"] = None
+
+                    result = await coll.find_one_and_update(
+                        {"sample_id": sample_id, "revision": expected_revision},
+                        {
+                            "$set": set_fields,
+                            "$inc": {"revision": 1},
+                            "$push": {"feedback_history": event},
+                        },
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    if result is not None:
+                        return TrainingSample(**self._remove_id(result))
+                    # Revision conflict — retry
+                except Exception as e:
+                    logger.error("TrainingSampleService Mongo feedback failed: %s", type(e).__name__)
+                    raise ServiceError(f"Database operation failed: {type(e).__name__}")
+
+            raise ConcurrencyError(f"Unable to apply feedback to {sample_id} after {max_retries} attempts due to revision conflict")
+
+        return None
 
     # ------------------------------------------------------------------
     # Stats
@@ -498,18 +578,14 @@ class TrainingSampleService:
         export_lines = []
         for doc in docs:
             clean = self._remove_id(deepcopy(doc))
-            # Reconstruct with deterministic ordering using Pydantic
             sample = TrainingSample(**clean)
             export_dict = sample.to_export_dict()
-            # Flatten datetime fields to ISO strings for JSONL
             for key in ["captured_at", "created_at", "updated_at"]:
                 if key in export_dict and isinstance(export_dict[key], datetime):
                     export_dict[key] = export_dict[key].isoformat().replace("+00:00", "Z")
-            # Also flatten nested datetime fields in feedback_history
             for evt in export_dict.get("feedback_history", []):
                 if isinstance(evt.get("submitted_at"), datetime):
                     evt["submitted_at"] = evt["submitted_at"].isoformat().replace("+00:00", "Z")
-            # Add verified_at if available
             if export_dict.get("final_verified_labels"):
                 export_dict["verified_at"] = export_dict.get("updated_at")
             export_lines.append(export_dict)
