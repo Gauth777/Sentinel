@@ -38,6 +38,8 @@ export default function TrainingSampleCard({ sample, selected, onPress }: Props)
   const statusColor = STATUS_COLORS[sample.feedbackStatus] || colors.onSurfaceTertiary;
   const inferenceBadge = INFERENCE_BADGE[sample.model.inferenceMode] || sample.model.inferenceMode.toUpperCase();
   const inferenceColor = INFERENCE_COLOR[sample.model.inferenceMode] || colors.onSurfaceSecondary;
+  const displayedLabels = sample.finalVerifiedLabels ?? sample.originalPrediction ?? sample.prediction;
+  const statusText = `${sample.datasetStatus.toUpperCase()} · ${sample.feedbackStatus.toUpperCase()}`;
 
   return (
     <Pressable
@@ -56,7 +58,7 @@ export default function TrainingSampleCard({ sample, selected, onPress }: Props)
         </Text>
         <View style={[styles.badge, { borderColor: statusColor }]}>
           <Text style={[styles.badgeText, { color: statusColor }]}>
-            {sample.feedbackStatus}
+            {statusText}
           </Text>
         </View>
       </View>
@@ -80,15 +82,15 @@ export default function TrainingSampleCard({ sample, selected, onPress }: Props)
       </View>
 
       <View style={styles.labelsRow}>
-        <LabelChip label={`Road: ${sample.prediction.roadType}`} />
-        <LabelChip label={`Hazard: ${sample.prediction.hazardPresence}`} />
-        <LabelChip label={`Risk: ${sample.prediction.anticipatedRisk}`} />
-        <LabelChip label={`Action: ${sample.prediction.recommendedAction}`} />
+        <LabelChip label={`Road: ${displayedLabels.roadType}`} />
+        <LabelChip label={`Hazard: ${displayedLabels.hazardPresence}`} />
+        <LabelChip label={`Risk: ${displayedLabels.anticipatedRisk}`} />
+        <LabelChip label={`Action: ${displayedLabels.recommendedAction}`} />
       </View>
 
-      {typeof sample.prediction.confidence === "number" && (
+      {typeof displayedLabels.confidence === "number" && (
         <Text style={styles.confidence}>
-          Confidence: {(sample.prediction.confidence * 100).toFixed(0)}%
+          Confidence: {(displayedLabels.confidence * 100).toFixed(0)}%
         </Text>
       )}
     </Pressable>

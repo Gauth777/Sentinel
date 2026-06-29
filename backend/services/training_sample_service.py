@@ -371,15 +371,12 @@ class TrainingSampleService:
         if feedback.status == FeedbackStatusInput.confirmed:
             new_dataset_status = DatasetStatus.verified.value
             new_feedback_status = FeedbackStatus.confirmed.value
-            final_labels = deepcopy(coll.find_one({"sample_id": sample_id}, {"_id": 0}).get("original_prediction")) if self._mode == "mongo" else None
         elif feedback.status == FeedbackStatusInput.corrected:
             new_dataset_status = DatasetStatus.verified.value
             new_feedback_status = FeedbackStatus.corrected.value
-            final_labels = None  # will be computed during update
         else:  # rejected
             new_dataset_status = DatasetStatus.rejected.value
             new_feedback_status = FeedbackStatus.rejected.value
-            final_labels = None
 
         # For memory mode: perform the entire read-modify-write under one lock
         if self._mode == "memory":

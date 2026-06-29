@@ -1,54 +1,84 @@
 import React, { useState, useCallback } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView, TextInput } from "react-native";
+import { View, Text, Pressable, StyleSheet, TextInput } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "@/src/theme";
-import type { TrainingSample, TrainingFeedbackCreate } from "@/src/types/training";
+import type { TrainingSample, TrainingFeedbackCreate, PartialPredictionLabels, PredictionLabels } from "@/src/types/training";
 import LabelCorrectionEditor from "./LabelCorrectionEditor";
 
 type Props = {
   sample: TrainingSample;
-  onFeedback: (payload: TrainingFeedbackCreate) => void;
+  onFeedback: (payload: TrainingFeedbackCreate) => Promise<TrainingSample>;
   loading?: boolean;
+  error?: string | null;
 };
 
-export default function TrainingSampleReview({ sample, onFeedback, loading }: Props) {
+export default function TrainingSampleReview({ sample, onFeedback, loading, error }: Props) {
   const [mode, setMode] = useState<"view" | "correct" | "reject-confirm">("view");
   const [rejectNote, setRejectNote] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
 
-  const handleConfirm = useCallback(() => {
-    onFeedback({
-      status: "confirmed",
-      submittedBy: "sentinel-demo-reviewer",
-    });
-  }, [onFeedback]);
-
-  const handleCorrect = useCallback(
-    (corrections: import("@/src/types/training").PartialPredictionLabels) => {
-      onFeedback({
-        status: "corrected",
-        correctedLabels: corrections,
+  const handleConfirm = useCallback(async () => {
+    setLocalError(null);
+    try {
+      await onFeedback({
+        status: "confirmed",
         submittedBy: "sentinel-demo-reviewer",
       });
       setMode("view");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLocalError(msg);
+    }
+  }, [onFeedback]);
+
+  const handleCorrect = useCallback(
+    async (corrections: PartialPredictionLabels) => {
+      setLocalError(null);
+      try {
+        const hasAnyCorrection = Object.keys(corrections).length > 0;
+        if (!hasAnyCorrection) {
+          // User edited back to original — confirm instead
+          await onFeedback({
+            status: "confirmed",
+            submittedBy: "sentinel-demo-reviewer",
+          });
+        } else {
+          await onFeedback({
+            status: "corrected",
+            correctedLabels: corrections,
+            submittedBy: "sentinel-demo-reviewer",
+          });
+        }
+        setMode("view");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setLocalError(msg);
+      }
     },
     [onFeedback]
   );
 
-  const handleReject = useCallback(() => {
-    onFeedback({
-      status: "rejected",
-      submittedBy: "sentinel-demo-reviewer",
-      note: rejectNote.trim() || undefined,
-    });
-    setMode("view");
-    setRejectNote("");
+  const handleReject = useCallback(async () => {
+    setLocalError(null);
+    try {
+      await onFeedback({
+        status: "rejected",
+        submittedBy: "sentinel-demo-reviewer",
+        note: rejectNote.trim() || undefined,
+      });
+      setMode("view");
+      setRejectNote("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLocalError(msg);
+    }
   }, [onFeedback, rejectNote]);
 
   const labels = sample.finalVerifiedLabels ?? sample.originalPrediction;
 
   return (
     <View style={styles.container} testID="training-sample-review">
-      <ScrollView showsVerticalScrollIndicator={false}>
+      <View>
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Context</Text>
           <KV k="Location" v={`${sample.context.location.latitude.toFixed(4)}, ${sample.context.location.longitude.toFixed(4)}`} />
@@ -142,6 +172,7 @@ export default function TrainingSampleReview({ sample, onFeedback, loading }: Pr
               <Pressable
                 onPress={() => setMode("view")}
                 style={({ pressed }) => [styles.btnGhost, pressed && { opacity: 0.7 }]}
+                disabled={loading}
               >
                 <Text style={styles.btnGhostText}>Cancel</Text>
               </Pressable>
@@ -155,7 +186,13 @@ export default function TrainingSampleReview({ sample, onFeedback, loading }: Pr
             </View>
           </View>
         )}
-      </ScrollView>
+
+        {(error || localError) && (
+          <View style={styles.mutationError}>
+            <Text style={styles.mutationErrorText}>{error || localError}</Text>
+          </View>
+        )}
+      </View>
 
       {mode === "view" && (
         <View style={styles.bottomActions}>
@@ -203,7 +240,7 @@ function KV({ k, v }: { k: string; v: string }) {
   );
 }
 
-function PredictionBlock({ labels }: { labels: import("@/src/types/training").PredictionLabels }) {
+function PredictionBlock({ labels }: { labels: PredictionLabels }) {
   return (
     <View style={styles.predictionGrid}>
       <PredChip label="Road" value={labels.roadType} />
@@ -409,5 +446,18 @@ const styles = StyleSheet.create({
     color: "#000",
     fontSize: 12,
     fontWeight: "600",
+  },
+  mutationError: {
+    marginTop: spacing.sm,
+    padding: spacing.sm,
+    backgroundColor: "rgba(248,81,73,0.08)",
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.error + "59",
+  },
+  mutationErrorText: {
+    color: colors.error,
+    fontSize: 11,
+    textAlign: "center",
   },
 });

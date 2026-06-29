@@ -28,8 +28,9 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { "Content-Type": "application/json" },
       ...init,
     });
-  } catch (err: any) {
-    throw new ApiError(`Network error calling ${path}: ${err?.message ?? err}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ApiError(`Network error calling ${path}: ${msg}`);
   }
   if (!res.ok) {
     throw new ApiError(`API ${path} responded ${res.status}`, res.status);
