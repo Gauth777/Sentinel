@@ -47,6 +47,12 @@ from services.training_sample_service import TrainingSampleService
 _training_samples = TrainingSampleService(db, MONGO_REACHABLE)
 
 
+from services.media_storage import LocalMediaStorage
+from services.media_service import MediaService
+_media_storage = LocalMediaStorage(db, MONGO_REACHABLE)
+_media_service = MediaService(_media_storage)
+
+
 # ======================= Models =======================
 class GeoPoint(BaseModel):
     latitude: float
@@ -459,11 +465,14 @@ api_router = APIRouter(prefix="/api")
 
 # Attach service references for route dependency injection
 app.state.training_sample_service = _training_samples
+app.state.media_service = _media_service
 
 
 from routes.training_samples import router as training_samples_router
+from routes.media import router as media_router
 
 api_router.include_router(training_samples_router)
+api_router.include_router(media_router)
 
 
 @api_router.get("/")
