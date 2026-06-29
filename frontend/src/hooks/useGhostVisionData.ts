@@ -50,18 +50,28 @@ export function useGhostVisionData(liveInput?: GhostVisionLiveInput) {
     worldModelRef.current = worldModel;
   }, [worldModel]);
 
-  const liveTelemetry = useMemo(
-    () =>
-      liveInput?.enabled && liveInput.location
-        ? { location: liveInput.location, headingDegrees: liveInput.headingDegrees }
-        : null,
-    [
-      liveInput?.enabled,
-      liveInput?.location?.latitude,
-      liveInput?.location?.longitude,
-      liveInput?.headingDegrees,
-    ]
-  );
+  const inputLatitude = liveInput?.location?.latitude;
+const inputLongitude = liveInput?.location?.longitude;
+const inputHeading = liveInput?.headingDegrees;
+const liveEnabled = liveInput?.enabled;
+
+const liveTelemetry = useMemo<LiveTelemetryInput | null>(() => {
+  if (
+    !liveEnabled ||
+    typeof inputLatitude !== "number" ||
+    typeof inputLongitude !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    location: {
+      latitude: inputLatitude,
+      longitude: inputLongitude,
+    },
+    headingDegrees: inputHeading,
+  };
+}, [liveEnabled, inputLatitude, inputLongitude, inputHeading]);
 
   useEffect(() => {
     liveTelemetryRef.current = liveTelemetry;
