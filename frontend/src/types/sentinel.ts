@@ -64,6 +64,7 @@ export type Hazard = {
   routeRelevance: RouteRelevance;
   confirmed: number;
   reportedIncorrect: number;
+  warnings?: Record<string, string>;
 };
 
 export type WorldModel = {

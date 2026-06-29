@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -894,16 +895,194 @@ async def test_memory_duplicate_concurrent_safety():
 # ------------------------------------------------------------------
 
 def _safe_import_server():
-    """Import server with local-safe configuration to avoid production DBs."""
-    os.environ["MONGODB_URL"] = ""
+    """Import server with local-safe configuration to avoid production DBs.
+
+    Uses a deliberately unreachable local URL and reloads if server
+    was already imported in a prior test.
+    """
+    import importlib
+
+    os.environ["MONGO_URL"] = "mongodb://127.0.0.1:1"
+    os.environ["DB_NAME"] = "sentinel_test"
     os.environ["NEO4J_URI"] = ""
     os.environ["NEO4J_USER"] = ""
     os.environ["NEO4J_PASSWORD"] = ""
+
     try:
-        from server import app as real_app
-        return real_app
+        import server
+        importlib.reload(server)
+        return server.app
     except ImportError:
         return None
+    except Exception:
+        return None
+
+
+def _safe_import_server_subprocess():
+    """Alternative: import server in a fresh subprocess."""
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["MONGO_URL"] = "mongodb://127.0.0.1:1"
+    env["DB_NAME"] = "sentinel_test"
+    env["NEO4J_URI"] = ""
+    env["NEO4J_USER"] = ""
+    env["NEO4J_PASSWORD"] = ""
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import server; print('OK')"],
+        cwd=backend_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.returncode == 0 and "OK" in result.stdout
+
+
+@pytest.mark.anyio
+async def test_mongo_confirmed_feedback_does_not_call_coroutine_get():
+    """Confirmed feedback in Mongo mode must not call .get() on an un-awaited coroutine."""
+    from services.training_sample_service import TrainingSampleService
+
+    call_log = []
+
+    FULL_DOC = {
+        "sample_id": "ts-mongo-fb",
+        "source_vehicle_id": "v-1",
+        "captured_at": datetime.now(timezone.utc),
+        "context": {"location": {"latitude": 12.0, "longitude": 80.0}, "telemetry_source": "demo"},
+        "media": {"type": "image", "uri": "demo://test", "storage_mode": "demo_uri"},
+        "model": {"provider": "demo", "name": "test", "version": "1", "inference_mode": "demo"},
+        "prediction": {
+            "road_type": "urban_arterial",
+            "traffic_density": "medium",
+            "road_complexity": "moderate",
+            "hazard_presence": "yes",
+            "anticipated_risk": "high",
+            "recommended_action": "slow_down",
+        },
+        "original_prediction": {
+            "road_type": "urban_arterial",
+            "traffic_density": "medium",
+            "road_complexity": "moderate",
+            "hazard_presence": "yes",
+            "anticipated_risk": "high",
+            "recommended_action": "slow_down",
+        },
+        "provenance": {"source": "demo"},
+        "dataset_status": "pending",
+        "feedback_status": "pending",
+        "feedback_history": [],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "revision": 1,
+    }
+
+    class FakeCollection:
+        async def find_one(self, filter, projection=None):
+            call_log.append(("find_one", filter))
+            return deepcopy(FULL_DOC)
+
+        async def find_one_and_update(self, filter, update, return_document=None):
+            call_log.append(("find_one_and_update", filter))
+            updated = deepcopy(FULL_DOC)
+            updated["dataset_status"] = "verified"
+            updated["feedback_status"] = "confirmed"
+            updated["final_verified_labels"] = {
+                "road_type": "urban_arterial",
+                "traffic_density": "medium",
+                "road_complexity": "moderate",
+                "hazard_presence": "yes",
+                "anticipated_risk": "high",
+                "recommended_action": "slow_down",
+            }
+            updated["revision"] = 2
+            updated["feedback_history"] = [{"status": "confirmed", "submitted_at": datetime.now(timezone.utc)}]
+            return updated
+
+    fake_db = {"training_samples": FakeCollection()}
+    svc = TrainingSampleService(fake_db, True)
+    await svc.initialize()
+
+    from models.training_samples import TrainingFeedbackCreate, FeedbackStatusInput
+
+    fb = TrainingFeedbackCreate(status=FeedbackStatusInput.confirmed)
+    result = await svc.submit_feedback("ts-mongo-fb", fb)
+
+    assert result is not None
+    assert result.feedback_status == FeedbackStatus.confirmed
+    assert result.dataset_status == DatasetStatus.verified
+    # The old bug was: coll.find_one(...).get(...) without await.
+    # If that happened, it would be a coroutine.get() which raises AttributeError.
+    # The test reaching this assertion proves the bug is absent.
+    find_one_calls = [c for c in call_log if c[0] == "find_one"]
+    find_one_update_calls = [c for c in call_log if c[0] == "find_one_and_update"]
+    assert len(find_one_calls) >= 1
+    assert len(find_one_update_calls) >= 1
+
+
+@pytest.mark.anyio
+async def test_mongo_revision_guard_preserved_on_conflict():
+    """Mongo feedback should retry on revision conflict and eventually fail cleanly."""
+    from services.training_sample_service import TrainingSampleService, ConcurrencyError
+
+    class FailingCollection:
+        async def find_one(self, filter, projection=None):
+            return {
+                "sample_id": "ts-mongo-rev",
+                "source_vehicle_id": "v-1",
+                "captured_at": datetime.now(timezone.utc),
+                "context": {"location": {"latitude": 12.0, "longitude": 80.0}, "telemetry_source": "demo"},
+                "media": {"type": "image", "uri": "demo://test", "storage_mode": "demo_uri"},
+                "model": {"provider": "demo", "name": "test", "version": "1", "inference_mode": "demo"},
+                "prediction": {
+                    "road_type": "urban_arterial",
+                    "traffic_density": "medium",
+                    "road_complexity": "moderate",
+                    "hazard_presence": "yes",
+                    "anticipated_risk": "high",
+                    "recommended_action": "slow_down",
+                },
+                "original_prediction": {
+                    "road_type": "urban_arterial",
+                    "traffic_density": "medium",
+                    "road_complexity": "moderate",
+                    "hazard_presence": "yes",
+                    "anticipated_risk": "high",
+                    "recommended_action": "slow_down",
+                },
+                "provenance": {"source": "demo"},
+                "revision": 1,
+                "feedback_history": [],
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+                "dataset_status": "pending",
+                "feedback_status": "pending",
+            }
+
+        async def find_one_and_update(self, filter, update, return_document=None):
+            # Always simulate revision mismatch
+            return None
+
+    fake_db = {"training_samples": FailingCollection()}
+    svc = TrainingSampleService(fake_db, True)
+
+    from models.training_samples import TrainingFeedbackCreate, FeedbackStatusInput
+
+    fb = TrainingFeedbackCreate(status=FeedbackStatusInput.confirmed)
+    with pytest.raises(ConcurrencyError):
+        await svc.submit_feedback("ts-mongo-rev", fb)
+
+
+# ------------------------------------------------------------------
+# Integration with existing server routes (using actual server if available)
+# ------------------------------------------------------------------
+
+def test_safe_server_subprocess_isolation():
+    """Prove that the server subprocess import uses safe test URLs."""
+    assert _safe_import_server_subprocess() is True
 
 
 def test_existing_perception_graph_route_still_works():

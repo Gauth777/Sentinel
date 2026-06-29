@@ -24,7 +24,7 @@ import MapLegend from "@/src/components/ghost-vision/MapLegend";
 import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
 import type { Hazard } from "@/src/types/sentinel";
-import { api } from "@/src/api/sentinel";
+import { api, ApiError } from "@/src/api/sentinel";
 import { trainingApi } from "@/src/api/trainingSamples";
 import { buildDemoTrainingSample } from "@/src/utils/demoTrainingSample";
 import { buildLiveObservation } from "@/src/utils/ghostVisionLive";
@@ -110,7 +110,7 @@ export default function GhostVisionScreen() {
     spokenForId.current = active.id;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     
-    const text = (active as any).warnings?.[selectedLanguage] || 
+    const text = active.warnings?.[selectedLanguage] ?? 
       `${active.label}. Approximately ${active.distanceMeters} metres ahead. ${active.recommendedAction}.`;
     
     Speech.speak(text, { rate: 0.95, pitch: 1.0 });
@@ -128,38 +128,62 @@ export default function GhostVisionScreen() {
   const onSubmitObservation = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     showActionFlash("Sharing observation…");
-    let hazard: Hazard | null = null;
-    try {
-      const obs =
-        loc.mode === "live" && loc.location
-          ? buildLiveObservation({
-              location: loc.location,
-              headingDegrees: loc.headingDegrees,
-            })
-          : {
-              id: "obs-demo-stationary-001",
-              type: "stationary_vehicle",
-              label: "Stationary Vehicle Ahead",
-              location: {
-                latitude: 12.9452,
-                longitude: 80.1506
-              },
-              polygon: [
-                { latitude: 12.9451, longitude: 80.1505 },
-                { latitude: 12.9451, longitude: 80.1507 },
-                { latitude: 12.9453, longitude: 80.1507 },
-                { latitude: 12.9453, longitude: 80.1505 }
-              ],
-              sourceVehicleId: "v-1",
-              vehicleLabel: "Sentinel-A8"
-            };
-      const result = await api.submitObservation(obs);
-      await refetch(true);
-      hazard = result as Hazard | null;
 
-      // Attempt dataset creation separately — must not break observation success
-      let datasetMsg = "";
-      if (trainingApi.hasBackend() && hazard) {
+    // 1. Primary operation: submit observation
+    let hazard: Hazard | null = null;
+    const obs =
+      loc.mode === "live" && loc.location
+        ? buildLiveObservation({
+            location: loc.location,
+            headingDegrees: loc.headingDegrees,
+          })
+        : {
+            id: "obs-demo-stationary-001",
+            type: "stationary_vehicle",
+            label: "Stationary Vehicle Ahead",
+            location: {
+              latitude: 12.9452,
+              longitude: 80.1506
+            },
+            polygon: [
+              { latitude: 12.9451, longitude: 80.1505 },
+              { latitude: 12.9451, longitude: 80.1507 },
+              { latitude: 12.9453, longitude: 80.1507 },
+              { latitude: 12.9453, longitude: 80.1505 }
+            ],
+            sourceVehicleId: "v-1",
+            vehicleLabel: "Sentinel-A8"
+          };
+
+    try {
+      hazard = await api.submitObservation(obs);
+    } catch (err: unknown) {
+      console.error("Failed to submit observation:", err);
+      showActionFlash("Submission Failed", 1800);
+      return; // Stop here — observation failed, do not proceed
+    }
+
+    // 2. Observation succeeded permanently.
+    // Show immediate driver-facing success.
+    const baseMsg =
+      loc.mode === "live"
+        ? "Live hazard shared with approaching vehicles"
+        : "Observation shared with approaching vehicles";
+    showActionFlash(baseMsg, 2600);
+
+    // 3. Secondary: refresh Ghost Vision independently
+    // Must not change the observation success state on failure.
+    refetch(true).catch((err: unknown) => {
+      console.warn("[Sentinel] Ghost Vision refresh failed after observation:",
+        err instanceof ApiError ? err.message : String(err));
+      showActionFlash(baseMsg + " · map refresh pending", 2600);
+    });
+
+    // 4. Secondary: queue training sample independently
+    // Must not change the observation success state on failure.
+    // Must not delay the observation success message.
+    if (trainingApi.hasBackend() && hazard) {
+      const queueDataset = async () => {
         try {
           const payload = buildDemoTrainingSample({
             observationId: obs.id,
@@ -173,27 +197,18 @@ export default function GhostVisionScreen() {
             telemetryMode: loc.mode === "live" ? "live" : "demo",
           });
           await trainingApi.createTrainingSample(payload);
-          datasetMsg = " · training sample queued";
-        } catch (err: any) {
-          const status = (err as any)?.status;
-          if (status === 409) {
-            datasetMsg = " · training sample already queued";
+          showActionFlash(baseMsg + " · training sample queued", 2600);
+        } catch (err: unknown) {
+          if (err instanceof ApiError && err.status === 409) {
+            showActionFlash(baseMsg + " · training sample already queued", 2600);
           } else {
-            console.warn("[Sentinel] dataset creation failed:", err?.message ?? err);
-            datasetMsg = " · dataset queue unavailable";
+            console.warn("[Sentinel] dataset creation failed:",
+              err instanceof ApiError ? err.message : String(err));
+            showActionFlash(baseMsg + " · dataset queue unavailable", 2600);
           }
         }
-      }
-
-      showActionFlash(
-        (loc.mode === "live"
-          ? "Live hazard shared with approaching vehicles"
-          : "Observation shared with approaching vehicles") + datasetMsg,
-        2600
-      );
-    } catch (err: any) {
-      console.error("Failed to submit observation:", err);
-      showActionFlash("Submission Failed", 1800);
+      };
+      queueDataset();
     }
   }, [loc.headingDegrees, loc.location, loc.mode, loc.speedKmh, refetch, showActionFlash, status?.road_name]);
 
@@ -468,6 +483,7 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
+                    // @ts-expect-error training-data route exists in app directory
                     router.push("/training-data");
                   }}
                   style={({ pressed }) => [styles.datasetLabBtn, pressed && { opacity: 0.85 }]}

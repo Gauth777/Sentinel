@@ -8,6 +8,7 @@ import type {
   Hazard,
   NearbyVehicle,
   WorldModel,
+  GeoPoint,
 } from "@/src/types/sentinel";
 
 export type WorldModelParams = {
@@ -15,6 +16,16 @@ export type WorldModelParams = {
   longitude?: number;
   heading?: number;
   radius_m?: number;
+};
+
+export type DemoObservationRequest = {
+  id: string;
+  type: string;
+  label: string;
+  location: GeoPoint;
+  polygon?: GeoPoint[];
+  sourceVehicleId: string;
+  vehicleLabel: string;
 };
 
 function backendBase() {
@@ -30,6 +41,11 @@ export class ApiError extends Error {
   }
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const base = backendBase();
   if (!base) {
@@ -41,8 +57,8 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { "Content-Type": "application/json" },
       ...init,
     });
-  } catch (err: any) {
-    throw new ApiError(`Network error calling ${path}: ${err?.message ?? err}`);
+  } catch (err: unknown) {
+    throw new ApiError(`Network error calling ${path}: ${getErrorMessage(err)}`);
   }
   if (!res.ok) {
     throw new ApiError(`API ${path} responded ${res.status}`, res.status);
@@ -74,16 +90,13 @@ export const api = {
       `/sentinel/hazards/${id}/report-incorrect`,
       { method: "POST" }
     ),
-  submitObservation: (obs: any) =>
-    j<any>(
-      "/sentinel/demo/observation",
-      { method: "POST", body: JSON.stringify(obs) }
-    ),
+  submitObservation: (obs: DemoObservationRequest) =>
+    j<Hazard>("/sentinel/demo/observation", {
+      method: "POST",
+      body: JSON.stringify(obs),
+    }),
   resetDemo: () =>
-    j<any>(
-      "/sentinel/demo/reset",
-      { method: "POST" }
-    ),
+    j<{ message: string }>("/sentinel/demo/reset", { method: "POST" }),
 };
 
 // Re-export types for legacy imports

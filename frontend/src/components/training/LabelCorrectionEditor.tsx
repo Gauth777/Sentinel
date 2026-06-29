@@ -1,5 +1,5 @@
-import React, { useState, useCallback } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView } from "react-native";
+import React, { useState, useCallback, useEffect } from "react";
+import { View, Text, Pressable, StyleSheet } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "@/src/theme";
 import type {
@@ -42,25 +42,36 @@ export default function LabelCorrectionEditor({
   onCancel,
   loading,
 }: Props) {
-  const base = currentFinal ?? original;
+  // editorBaseline = what the reviewer sees when opening the editor
+  const editorBaseline = currentFinal ?? original;
 
-  const [roadType, setRoadType] = useState<RoadType>(base.roadType);
-  const [trafficDensity, setTrafficDensity] = useState<TrafficDensity>(base.trafficDensity);
-  const [roadComplexity, setRoadComplexity] = useState<RoadComplexity>(base.roadComplexity);
-  const [hazardPresence, setHazardPresence] = useState<HazardPresence>(base.hazardPresence);
-  const [anticipatedRisk, setAnticipatedRisk] = useState<AnticipatedRisk>(base.anticipatedRisk);
+  const [roadType, setRoadType] = useState<RoadType>(editorBaseline.roadType);
+  const [trafficDensity, setTrafficDensity] = useState<TrafficDensity>(editorBaseline.trafficDensity);
+  const [roadComplexity, setRoadComplexity] = useState<RoadComplexity>(editorBaseline.roadComplexity);
+  const [hazardPresence, setHazardPresence] = useState<HazardPresence>(editorBaseline.hazardPresence);
+  const [anticipatedRisk, setAnticipatedRisk] = useState<AnticipatedRisk>(editorBaseline.anticipatedRisk);
   const [recommendedAction, setRecommendedAction] = useState<RecommendedAction>(
-    base.recommendedAction
+    editorBaseline.recommendedAction
   );
+
+  // Reset state when the sample changes
+  useEffect(() => {
+    setRoadType(editorBaseline.roadType);
+    setTrafficDensity(editorBaseline.trafficDensity);
+    setRoadComplexity(editorBaseline.roadComplexity);
+    setHazardPresence(editorBaseline.hazardPresence);
+    setAnticipatedRisk(editorBaseline.anticipatedRisk);
+    setRecommendedAction(editorBaseline.recommendedAction);
+  }, [editorBaseline]);
 
   const hasChanges = useCallback(() => {
     return (
-      roadType !== original.roadType ||
-      trafficDensity !== original.trafficDensity ||
-      roadComplexity !== original.roadComplexity ||
-      hazardPresence !== original.hazardPresence ||
-      anticipatedRisk !== original.anticipatedRisk ||
-      recommendedAction !== original.recommendedAction
+      roadType !== editorBaseline.roadType ||
+      trafficDensity !== editorBaseline.trafficDensity ||
+      roadComplexity !== editorBaseline.roadComplexity ||
+      hazardPresence !== editorBaseline.hazardPresence ||
+      anticipatedRisk !== editorBaseline.anticipatedRisk ||
+      recommendedAction !== editorBaseline.recommendedAction
     );
   }, [
     roadType,
@@ -69,10 +80,11 @@ export default function LabelCorrectionEditor({
     hazardPresence,
     anticipatedRisk,
     recommendedAction,
-    original,
+    editorBaseline,
   ]);
 
   const handleSubmit = useCallback(() => {
+    // Build corrections relative to original prediction (backend merges over original)
     const corrections: PartialPredictionLabels = {};
     if (roadType !== original.roadType) corrections.roadType = roadType;
     if (trafficDensity !== original.trafficDensity) corrections.trafficDensity = trafficDensity;
@@ -97,54 +109,50 @@ export default function LabelCorrectionEditor({
 
   return (
     <View style={styles.container} testID="training-label-editor">
-      <ScrollView
-        horizontal={false}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: spacing.md }}
-      >
+      <View>
         <SegmentRow
           title="Road Type"
           options={ROAD_TYPES}
           value={roadType}
           onChange={setRoadType}
-          original={original.roadType}
+          baseline={editorBaseline.roadType}
         />
         <SegmentRow
           title="Traffic Density"
           options={TRAFFIC_DENSITIES}
           value={trafficDensity}
           onChange={setTrafficDensity}
-          original={original.trafficDensity}
+          baseline={editorBaseline.trafficDensity}
         />
         <SegmentRow
           title="Road Complexity"
           options={ROAD_COMPLEXITIES}
           value={roadComplexity}
           onChange={setRoadComplexity}
-          original={original.roadComplexity}
+          baseline={editorBaseline.roadComplexity}
         />
         <SegmentRow
           title="Hazard Presence"
           options={HAZARD_PRESENCES}
           value={hazardPresence}
           onChange={setHazardPresence}
-          original={original.hazardPresence}
+          baseline={editorBaseline.hazardPresence}
         />
         <SegmentRow
           title="Anticipated Risk"
           options={ANTICIPATED_RISKS}
           value={anticipatedRisk}
           onChange={setAnticipatedRisk}
-          original={original.anticipatedRisk}
+          baseline={editorBaseline.anticipatedRisk}
         />
         <SegmentRow
           title="Recommended Action"
           options={RECOMMENDED_ACTIONS}
           value={recommendedAction}
           onChange={setRecommendedAction}
-          original={original.recommendedAction}
+          baseline={editorBaseline.recommendedAction}
         />
-      </ScrollView>
+      </View>
 
       <View style={styles.actions}>
         <Pressable
@@ -177,19 +185,19 @@ function SegmentRow<T extends string>({
   options,
   value,
   onChange,
-  original,
+  baseline,
 }: {
   title: string;
   options: readonly T[];
   value: T;
   onChange: (v: T) => void;
-  original: T;
+  baseline: T;
 }) {
   return (
     <View style={styles.row}>
       <View style={styles.rowHeader}>
         <Text style={styles.rowTitle}>{title}</Text>
-        {value !== original && (
+        {value !== baseline && (
           <Text style={styles.changedBadge}>CHANGED</Text>
         )}
       </View>

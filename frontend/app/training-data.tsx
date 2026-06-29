@@ -46,6 +46,7 @@ export default function TrainingDataScreen() {
   const [error, setError] = useState<string | null>(null);
   const [mutationLoading, setMutationLoading] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   const fetchAll = useCallback(async (isRefresh = false) => {
     if (!isRefresh) setLoading(true);
@@ -60,11 +61,19 @@ export default function TrainingDataScreen() {
       if (!mountedRef.current) return;
       setStats(s);
       setSamples(list.items);
-      // Keep selected if still present, else clear
-      setSelectedId((prev) =>
-        prev && list.items.some((i) => i.sampleId === prev) ? prev : null
-      );
-    } catch (err: any) {
+      // Keep selected only if it still belongs in the active filter
+      setSelectedId((prev) => {
+        if (!prev) return null;
+        const stillPresent = list.items.some((i) => i.sampleId === prev);
+        if (!stillPresent) return null;
+        // If filtering by status, verify the sample still matches
+        if (activeFilter !== "all") {
+          const sample = list.items.find((i) => i.sampleId === prev);
+          if (!sample || sample.datasetStatus !== activeFilter) return null;
+        }
+        return prev;
+      });
+    } catch (err: unknown) {
       if (!mountedRef.current) return;
       const msg = err instanceof ApiError ? err.message : String(err);
       setError(msg);
@@ -93,26 +102,44 @@ export default function TrainingDataScreen() {
     async (sampleId: string, payload: TrainingFeedbackCreate) => {
       setMutationLoading(true);
       setMutationError(null);
+      setSuccessMsg(null);
       try {
         const updated = await trainingApi.submitTrainingFeedback(sampleId, payload);
-        if (!mountedRef.current) return;
-        setSamples((prev) =>
-          prev.map((s) => (s.sampleId === updated.sampleId ? updated : s))
-        );
-        setSelectedId(updated.sampleId);
-        // Refresh stats in background
-        trainingApi.getTrainingStats().then((s) => {
-          if (mountedRef.current) setStats(s);
-        }).catch(() => {});
-      } catch (err: any) {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current) return updated;
+
+        // Refresh the filtered list so the sample disappears if it no longer matches
+        await fetchAll(true);
+
+        if (mountedRef.current) {
+          setSuccessMsg(
+            payload.status === "confirmed"
+              ? "Sample confirmed"
+              : payload.status === "corrected"
+              ? "Sample corrected"
+              : "Sample rejected"
+          );
+          // Clear success message after delay
+          setTimeout(() => {
+            if (mountedRef.current) setSuccessMsg(null);
+          }, 2000);
+        }
+        return updated;
+      } catch (err: unknown) {
+        if (!mountedRef.current) throw err;
         const msg = err instanceof ApiError ? err.message : String(err);
-        setMutationError(msg);
+        if (err instanceof ApiError && err.status === 404) {
+          setMutationError("Sample no longer exists. Refreshing list…");
+          setSelectedId(null);
+          fetchAll(true);
+        } else {
+          setMutationError(msg);
+        }
+        throw err;
       } finally {
         if (mountedRef.current) setMutationLoading(false);
       }
     },
-    []
+    [fetchAll]
   );
 
   const onExport = useCallback(() => {
@@ -124,6 +151,7 @@ export default function TrainingDataScreen() {
 
   const exportable = stats?.exportable ?? 0;
   const isMemory = stats?.mode === "memory";
+  const modeLabel = stats?.mode === "mongo" ? "MONGO" : stats?.mode === "memory" ? "MEMORY" : "";
 
   return (
     <View style={styles.root} testID="training-data-screen">
@@ -143,14 +171,21 @@ export default function TrainingDataScreen() {
             </View>
             <View style={{ width: 28 }} />
           </View>
-          {isMemory && (
-            <View style={styles.memoryNotice} testID="training-memory-mode-notice">
-              <MaterialCommunityIcons name="database-alert" size={14} color={colors.warning} />
-              <Text style={styles.memoryNoticeText}>
-                Temporary storage · data resets with backend restart
-              </Text>
-            </View>
-          )}
+          <View style={styles.headerMetaRow}>
+            {modeLabel ? (
+              <View style={styles.modeBadge}>
+                <Text style={styles.modeBadgeText}>{modeLabel}</Text>
+              </View>
+            ) : null}
+            {isMemory && (
+              <View style={styles.memoryNotice} testID="training-memory-mode-notice">
+                <MaterialCommunityIcons name="database-alert" size={14} color={colors.warning} />
+                <Text style={styles.memoryNoticeText}>
+                  Temporary storage · data resets with backend restart
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
 
         {/* Stats */}
@@ -201,6 +236,13 @@ export default function TrainingDataScreen() {
             </Pressable>
           ))}
         </View>
+
+        {/* Success message */}
+        {successMsg && (
+          <View style={styles.successBanner}>
+            <Text style={styles.successBannerText}>{successMsg}</Text>
+          </View>
+        )}
 
         {/* Content */}
         {loading && !refreshing && (
@@ -256,17 +298,12 @@ export default function TrainingDataScreen() {
                         sample={sample}
                         onFeedback={(payload) => onFeedback(sample.sampleId, payload)}
                         loading={mutationLoading}
+                        error={mutationError}
                       />
                     )}
                   </React.Fragment>
                 ))}
               </>
-            )}
-
-            {mutationError && (
-              <View style={styles.mutationError}>
-                <Text style={styles.mutationErrorText}>{mutationError}</Text>
-              </View>
             )}
           </ScrollView>
         )}
@@ -315,16 +352,37 @@ const styles = StyleSheet.create({
     marginTop: 2,
     letterSpacing: 0.5,
   },
-  memoryNotice: {
+  headerMetaRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
     marginTop: spacing.sm,
+    flexWrap: "wrap",
+  },
+  modeBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modeBadgeText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  memoryNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
     padding: spacing.sm,
     backgroundColor: "rgba(210,153,34,0.08)",
     borderRadius: radius.sm,
     borderWidth: 1,
     borderColor: colors.warning + "59",
+    flex: 1,
   },
   memoryNoticeText: {
     color: colors.warning,
@@ -389,6 +447,21 @@ const styles = StyleSheet.create({
     color: colors.brand,
     fontWeight: "600",
   },
+  successBanner: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    padding: spacing.sm,
+    backgroundColor: "rgba(35,197,94,0.08)",
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.success + "59",
+  },
+  successBannerText: {
+    color: colors.success,
+    fontSize: 11,
+    fontWeight: "600",
+    textAlign: "center",
+  },
   empty: {
     alignItems: "center",
     justifyContent: "center",
@@ -416,19 +489,5 @@ const styles = StyleSheet.create({
     color: "#000",
     fontSize: 12,
     fontWeight: "600",
-  },
-  mutationError: {
-    marginHorizontal: spacing.lg,
-    marginTop: spacing.sm,
-    padding: spacing.sm,
-    backgroundColor: "rgba(248,81,73,0.08)",
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.error + "59",
-  },
-  mutationErrorText: {
-    color: colors.error,
-    fontSize: 11,
-    textAlign: "center",
   },
 });

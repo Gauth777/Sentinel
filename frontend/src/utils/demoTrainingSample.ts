@@ -3,6 +3,8 @@
  *
  *  All predictions are explicitly synthetic/demo-generated.
  *  No real VLM inference is performed.
+ *  The sample is always synthetic; live telemetry context is preserved
+ *  but never presented as live captured evidence.
  */
 import type { GeoPoint } from "@/src/types/sentinel";
 import type {
@@ -71,15 +73,20 @@ export function buildDemoTrainingSample(input: DemoObservationInput): TrainingSa
     telemetrySource: telemetryMode,
   };
 
+  // Provenance is always demo because the sample itself is synthetic.
+  // Live telemetry coordinates may be in context, but the evidence is not live.
   const provenance: TrainingProvenance = {
-    source: telemetryMode === "live" ? "live" : "demo",
+    source: "demo",
     graphHazardId: input.hazardId,
     graphObservationId: input.observationId,
   };
 
+  const rawId = `training-${input.observationId}`;
+  const sampleId = sanitiseSampleId(rawId) || "training-observation";
+
   return {
     schemaVersion: "sentinel.training.v1",
-    sampleId: `training-${input.observationId}`,
+    sampleId,
     observationId: input.observationId,
     hazardId: input.hazardId,
     sourceVehicleId: input.sourceVehicleId,
