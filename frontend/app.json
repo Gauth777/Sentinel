@@ -11,7 +11,8 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Sentinel uses your location to show nearby road hazards on Ghost Vision."
+        "NSLocationWhenInUseUsageDescription": "Sentinel uses your location to show nearby road hazards on Ghost Vision.",
+        "NSCameraUsageDescription": "Sentinel uses the camera to capture road images for cooperative perception research."
       }
     },
     "android": {
@@ -25,7 +26,8 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.CAMERA"
       ]
     },
     "web": {
@@ -48,6 +50,12 @@
         "expo-location",
         {
           "locationAlwaysAndWhenInUsePermission": "Sentinel uses your location to show nearby road hazards on Ghost Vision."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Sentinel uses the camera to capture road images for cooperative perception research."
         }
       ]
     ],
