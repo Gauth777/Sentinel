@@ -21,7 +21,9 @@ export default function CapturePreview({ media, telemetry, onRetake, onUse, load
         <Text style={styles.metaTitle}>Image Preview</Text>
         <View style={styles.metaRow}>
           <Text style={styles.metaLabel}>Size</Text>
-          <Text style={styles.metaValue}>{media.width} × {media.height}</Text>
+          <Text style={styles.metaValue}>
+            {media.width && media.height ? `${media.width} × ${media.height}` : "Unknown"}
+          </Text>
         </View>
 
         {telemetry ? (

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { View, Text, Pressable, StyleSheet, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -6,54 +6,71 @@ import { useRouter } from "expo-router";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { mediaApi } from "@/src/api/media";
 import { ApiError } from "@/src/api/sentinel";
+import { useSentinelLocation } from "@/src/hooks/useSentinelLocation";
 import type { CaptureState, CapturedMedia, MediaTelemetry } from "@/src/types/media";
 import ObservationCamera from "@/src/components/capture/ObservationCamera";
 import CapturePreview from "@/src/components/capture/CapturePreview";
 
-// Telemetry is injected via route params from Ghost Vision
 export default function CaptureObservationScreen() {
   const router = useRouter();
   const mountedRef = useRef(true);
 
-  const [captureState, setCaptureState] = useState<CaptureState>("checking_permission");
+  // Use the same location hook as Ghost Vision for real telemetry
+  const { location, headingDegrees, speedKmh, mode: locationMode } = useSentinelLocation();
+
+  const [captureState, setCaptureState] = useState<CaptureState>("camera_ready");
   const [capturedMedia, setCapturedMedia] = useState<CapturedMedia | null>(null);
   const [telemetry, setTelemetry] = useState<MediaTelemetry | null>(null);
   const [uploadResult, setUploadResult] = useState<import("@/src/types/media").MediaUploadResponse | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  // Simulate checking permission state transition
-  const handleCapture = useCallback((uri: string) => {
-    // Extract dimensions from the photo if available; use defaults
-    const media: CapturedMedia = {
-      uri,
-      width: 1920,
-      height: 1080,
-      mimeType: "image/jpeg",
-      capturedAt: new Date().toISOString(),
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
     };
-    setCapturedMedia(media);
-
-    // Build telemetry from current Ghost Vision state if available
-    // In a real app, this would come from route params or context
-    const telem: MediaTelemetry = {
-      capturedAt: media.capturedAt,
-      telemetrySource: "unavailable",
-    };
-    setTelemetry(telem);
-    setCaptureState("preview");
   }, []);
+
+  const safeSetState = useCallback((setter: () => void) => {
+    if (mountedRef.current) {
+      setter();
+    }
+  }, []);
+
+  const handleCapture = useCallback((media: CapturedMedia) => {
+    const hasLiveLocation = locationMode === "live" && location !== null;
+    const telem: MediaTelemetry = {
+      location: hasLiveLocation
+        ? { latitude: location.latitude, longitude: location.longitude }
+        : null,
+      headingDegrees: headingDegrees ?? null,
+      speedKmh: speedKmh && speedKmh > 0 ? speedKmh : null,
+      capturedAt: media.capturedAt,
+      telemetrySource: hasLiveLocation ? "live" : "unavailable",
+    };
+
+    safeSetState(() => {
+      setCapturedMedia(media);
+      setTelemetry(telem);
+      setCaptureState("preview");
+    });
+  }, [location, headingDegrees, speedKmh, locationMode, safeSetState]);
 
   const handleRetake = useCallback(() => {
-    setCapturedMedia(null);
-    setUploadResult(null);
-    setUploadError(null);
-    setCaptureState("camera_ready");
-  }, []);
+    safeSetState(() => {
+      setCapturedMedia(null);
+      setUploadResult(null);
+      setUploadError(null);
+      setCaptureState("camera_ready");
+    });
+  }, [safeSetState]);
 
   const handleUpload = useCallback(async () => {
     if (!capturedMedia) return;
-    setCaptureState("uploading");
-    setUploadError(null);
+    safeSetState(() => {
+      setCaptureState("uploading");
+      setUploadError(null);
+    });
 
     try {
       const result = await mediaApi.uploadMedia({
@@ -63,20 +80,26 @@ export default function CaptureObservationScreen() {
         telemetry,
       });
       if (!mountedRef.current) return;
-      setUploadResult(result);
-      setCaptureState("upload_success");
+      safeSetState(() => {
+        setUploadResult(result);
+        setCaptureState("upload_success");
+      });
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       const msg = err instanceof ApiError ? err.message : String(err);
-      setUploadError(msg);
-      setCaptureState("upload_error");
+      safeSetState(() => {
+        setUploadError(msg);
+        setCaptureState("upload_error");
+      });
     }
-  }, [capturedMedia, telemetry]);
+  }, [capturedMedia, telemetry, safeSetState]);
 
   const handleRetry = useCallback(() => {
-    setUploadError(null);
-    setCaptureState("preview");
-  }, []);
+    safeSetState(() => {
+      setUploadError(null);
+      setCaptureState("preview");
+    });
+  }, [safeSetState]);
 
   return (
     <View style={styles.root} testID="capture-observation-screen">

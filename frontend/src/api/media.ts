@@ -14,6 +14,13 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+function parseUploadError(status: number, detail?: string): string {
+  if (status === 413) return "Image exceeds the upload limit.";
+  if (status === 415) return "Unsupported or invalid image format.";
+  if (status === 400) return detail || "Invalid image metadata.";
+  return `Upload failed (${status})`;
+}
+
 export const mediaApi = {
   hasBackend: () => Boolean(backendBase()),
 
@@ -69,8 +76,32 @@ export const mediaApi = {
     }
 
     if (!res.ok) {
-      const msg = `Upload responded ${res.status}`;
+      let detail: string | undefined;
+      try {
+        const body = await res.json();
+        detail = body?.detail;
+      } catch {
+        // ignore parse failure
+      }
+      const msg = parseUploadError(res.status, detail);
       throw new ApiError(msg, res.status);
+    }
+    return (await res.json()) as MediaUploadResponse;
+  },
+
+  getMedia: async (mediaId: string): Promise<MediaUploadResponse> => {
+    const base = backendBase();
+    if (!base) {
+      throw new ApiError("EXPO_PUBLIC_BACKEND_URL is not configured");
+    }
+    let res: Response;
+    try {
+      res = await fetch(`${base}/api/sentinel/media/${encodeURIComponent(mediaId)}`);
+    } catch (err: unknown) {
+      throw new ApiError(`Network error: ${getErrorMessage(err)}`);
+    }
+    if (!res.ok) {
+      throw new ApiError(`Media fetch responded ${res.status}`, res.status);
     }
     return (await res.json()) as MediaUploadResponse;
   },
