@@ -4,12 +4,10 @@ Endpoints:
   POST /api/sentinel/media
   GET  /api/sentinel/media/{media_id}
   GET  /api/sentinel/media/{media_id}/file
-  DELETE /api/sentinel/media/{media_id}
 """
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +17,7 @@ from starlette.status import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
-    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_415_UNSUPPORTED_MEDIA_TYPE,
 )
 
@@ -49,10 +47,22 @@ async def upload_media(
     file: UploadFile = File(...),
     latitude: Optional[float] = Form(default=None),
     longitude: Optional[float] = Form(default=None),
-    heading_degrees: Optional[float] = Form(default=None),
-    speed_kmh: Optional[float] = Form(default=None),
-    captured_at: Optional[str] = Form(default=None),
-    telemetry_source: Optional[str] = Form(default=None),
+    heading_degrees: Optional[float] = Form(
+        default=None,
+        alias="headingDegrees",
+    ),
+    speed_kmh: Optional[float] = Form(
+        default=None,
+        alias="speedKmh",
+    ),
+    captured_at: Optional[str] = Form(
+        default=None,
+        alias="capturedAt",
+    ),
+    telemetry_source: Optional[str] = Form(
+        default=None,
+        alias="telemetrySource",
+    ),
     request: Request = None,  # type: ignore
 ):
     svc = _get_media_service(request)
@@ -92,8 +102,10 @@ async def upload_media(
     except MediaServiceError as e:
         msg = str(e).lower()
         if "exceeds maximum" in msg:
-            raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
-        if "unsupported" in msg or "signature" in msg or "empty" in msg:
+            raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+        if "empty file" in msg:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
+        if "unsupported" in msg or "signature" in msg or "does not match" in msg:
             raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(e))
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -115,26 +127,25 @@ async def get_media_metadata(request: Request, media_id: str):
 @router.get("/{media_id}/file")
 async def get_media_file(request: Request, media_id: str):
     svc = _get_media_service(request)
-    file_path = await svc.get_file_path(media_id)
-    if file_path is None:
+    info = await svc.get_file_info(media_id)
+    if info is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media not found")
 
-    # Determine Content-Type from stored metadata
-    stored = await svc._storage.get(media_id)
-    if stored is None:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media not found")
+    # Verify the file exists on disk
+    file_path = info["file_path"]
+    if not Path(file_path).exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media file not found")
+
+    # Security: ensure the resolved file remains inside configured storage
+    storage_dir = Path(svc._storage.media_dir).resolve()
+    resolved_path = Path(file_path).resolve()
+    try:
+        resolved_path.relative_to(storage_dir)
+    except ValueError:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Invalid file path")
 
     return FileResponse(
         path=file_path,
-        media_type=stored.mime_type,
-        filename=f"{media_id}.{stored.extension}",
+        media_type=info["mime_type"],
+        filename=f"{media_id}.{info['extension']}",
     )
-
-
-@router.delete("/{media_id}")
-async def delete_media(request: Request, media_id: str):
-    svc = _get_media_service(request)
-    deleted = await svc.delete(media_id)
-    if not deleted:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media not found")
-    return {"deleted": True}
