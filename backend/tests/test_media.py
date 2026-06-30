@@ -439,7 +439,7 @@ def test_public_delete_route_absent(client):
 
 # --------------------------- Router coexistence ---------------------------
 
-def test_media_and_training_routers_coexist():
+def test_media_and_training_routers_coexist(temp_media_dir):
     """Media and training-sample routers must mount without path conflict."""
     from services.training_sample_service import TrainingSampleService, _InMemoryTrainingStore
 
@@ -450,8 +450,8 @@ def test_media_and_training_routers_coexist():
     ts_svc = TrainingSampleService(ts_store, False)
     app.state.training_sample_service = ts_svc
 
-    # Media service
-    ms_store = LocalMediaStorage(db=None, mongo_reachable=False)
+    # Media service with temp directory
+    ms_store = LocalMediaStorage(db=None, mongo_reachable=False, media_dir=temp_media_dir)
     ms_svc = MediaService(ms_store)
     app.state.media_service = ms_svc
 
