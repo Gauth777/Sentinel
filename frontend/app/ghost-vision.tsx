@@ -483,6 +483,19 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
+                    // @ts-expect-error capture-observation route exists in app directory
+                    router.push("/capture-observation");
+                  }}
+                  style={({ pressed }) => [styles.captureBtn, pressed && { opacity: 0.85 }]}
+                  testID="capture-observation-link"
+                  android_ripple={{ color: "#003844" }}
+                >
+                  <MaterialCommunityIcons name="camera" size={14} color={colors.success} />
+                  <Text style={styles.captureBtnText}>CAPTURE ROAD IMAGE</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    Haptics.selectionAsync().catch(() => {});
                     // @ts-expect-error training-data route exists in app directory
                     router.push("/training-data");
                   }}
@@ -1070,6 +1083,24 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "500",
     letterSpacing: 0.5,
+  },
+  captureBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(35,197,94,0.06)",
+    borderWidth: 1,
+    borderColor: colors.success + "59",
+  },
+  captureBtnText: {
+    color: colors.success,
+    fontSize: 12,
+    fontWeight: "600",
+    letterSpacing: 1,
   },
   datasetLabBtn: {
     flexDirection: "row",
