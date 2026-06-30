@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from models.media import MediaLocation, MediaTelemetry, TelemetrySource
 from services.media_storage import LocalMediaStorage
@@ -52,19 +52,7 @@ class MediaService:
         except ValueError as e:
             raise MediaServiceError(str(e))
 
-        # Validate file type/signature
-        try:
-            self._storage.validate_file_type(mime_type, extension, temp_path)
-        except ValueError as e:
-            # Clean up temp file
-            try:
-                import os
-                os.unlink(temp_path)
-            except Exception:
-                pass
-            raise MediaServiceError(str(e))
-
-        # Reject empty files
+        # Validate file type/signature AFTER confirming file is not empty
         if size_bytes == 0:
             try:
                 import os
@@ -72,6 +60,16 @@ class MediaService:
             except Exception:
                 pass
             raise MediaServiceError("Empty file")
+
+        try:
+            self._storage.validate_file_type(mime_type, extension, temp_path)
+        except ValueError as e:
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise MediaServiceError(str(e))
 
         # Validate numeric telemetry fields explicitly
         if heading_degrees is not None and (heading_degrees < 0 or heading_degrees >= 360):
@@ -89,13 +87,46 @@ class MediaService:
                 pass
             raise MediaServiceError("speed_kmh must be non-negative")
 
-        # Build telemetry metadata
-        telemetry = None
+        # Validate partial location
+        if (latitude is None) != (longitude is None):
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise MediaServiceError("latitude and longitude must be supplied together")
+
+        # Validate telemetry_source
+        allowed_sources = {"demo", "live", "unavailable"}
+        if telemetry_source is not None and telemetry_source not in allowed_sources:
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise MediaServiceError(f"telemetry_source must be one of {allowed_sources}")
+
+        # Parse and validate captured_at
+        cap_dt: datetime
+        if captured_at:
+            try:
+                cap_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+            except Exception as e:
+                try:
+                    import os
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                raise MediaServiceError(f"Invalid capturedAt: {e}")
+        else:
+            cap_dt = datetime.now(timezone.utc)
+
+        # Build telemetry metadata (always present, location is optional)
+        location = None
         if latitude is not None and longitude is not None:
             try:
                 location = MediaLocation(latitude=latitude, longitude=longitude)
             except Exception as e:
-                # Clean up temp file
                 try:
                     import os
                     os.unlink(temp_path)
@@ -103,26 +134,17 @@ class MediaService:
                     pass
                 raise MediaServiceError(f"Invalid location: {e}")
 
-            ts = TelemetrySource.unavailable
-            if telemetry_source in ("demo", "live", "unavailable"):
-                ts = TelemetrySource(telemetry_source)
+        ts = TelemetrySource.unavailable
+        if telemetry_source in allowed_sources:
+            ts = TelemetrySource(telemetry_source)
 
-            cap_dt = None
-            if captured_at:
-                try:
-                    cap_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
-                except Exception:
-                    cap_dt = datetime.now(timezone.utc)
-            else:
-                cap_dt = datetime.now(timezone.utc)
-
-            telemetry = MediaTelemetry(
-                location=location,
-                heading_degrees=heading_degrees,
-                speed_kmh=speed_kmh,
-                captured_at=cap_dt,
-                telemetry_source=ts,
-            )
+        telemetry = MediaTelemetry(
+            location=location,
+            heading_degrees=heading_degrees,
+            speed_kmh=speed_kmh,
+            captured_at=cap_dt,
+            telemetry_source=ts,
+        )
 
         # Delegate to storage
         try:
@@ -152,11 +174,16 @@ class MediaService:
             return None
         return stored.to_api_dict()
 
-    async def get_file_path(self, media_id: str) -> Optional[str]:
+    async def get_file_info(self, media_id: str) -> Optional[dict]:
+        """Return safe file info for serving. Does not expose absolute paths."""
         stored = await self._storage.get(media_id)
         if stored is None:
             return None
-        return stored.file_path
+        return {
+            "file_path": stored.file_path,
+            "mime_type": stored.mime_type,
+            "extension": stored.extension,
+        }
 
     async def delete(self, media_id: str) -> bool:
         return await self._storage.delete(media_id)

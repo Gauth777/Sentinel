@@ -20,9 +20,10 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from models.media import TelemetrySource
-from services.media_storage import LocalMediaStorage
+from services.media_storage import LocalMediaStorage, DEFAULT_MEDIA_DIR
 from services.media_service import MediaService, MediaServiceError
 from routes.media import router as media_router
+from routes.training_samples import router as training_samples_router
 
 
 # --------------------------- Fixtures ---------------------------
@@ -126,9 +127,9 @@ def test_webp_upload_succeeds(client):
     assert d["sizeBytes"] > 0
 
 
-def test_empty_file_rejected(client):
+def test_empty_file_returns_400(client):
     r = upload(client, "test.jpg", b"", "image/jpeg")
-    assert r.status_code == 415
+    assert r.status_code == 400
 
 
 def test_unsupported_mime_rejected(client):
@@ -148,6 +149,12 @@ def test_mime_signature_mismatch_rejected(client):
     assert r.status_code == 415
 
 
+def test_extension_mime_mismatch_rejected(client):
+    # JPEG body with JPEG MIME but .png extension
+    r = upload(client, "test.png", make_jpeg(), "image/jpeg")
+    assert r.status_code == 415
+
+
 def test_oversized_file_rejected(client, memory_storage):
     memory_storage._max_bytes = 500
     big = make_jpeg(1024)
@@ -164,11 +171,9 @@ def test_media_id_generated_server_side(client):
 
 def test_uploaded_filename_cannot_cause_path_traversal(client, memory_storage):
     r = upload(client, "../../etc/passwd.jpg", make_jpeg(), "image/jpeg")
-    # Should either reject the filename or safely sanitize it
     assert r.status_code in (201, 415)
     if r.status_code == 201:
         d = r.json()
-        # The stored file should not be outside the media directory
         stored = asyncio.run(memory_storage.get(d["mediaId"]))
         assert stored is not None
         assert Path(stored.file_path).resolve().is_relative_to(Path(memory_storage.media_dir).resolve())
@@ -244,7 +249,7 @@ def test_location_validation_rejects_invalid_longitude(client):
 def test_negative_speed_rejected(client):
     r = upload(
         client, "test.jpg", make_jpeg(), "image/jpeg",
-        extra={"speed_kmh": -1}
+        extra={"headingDegrees": 8, "speedKmh": -1}
     )
     assert r.status_code == 400
 
@@ -252,7 +257,7 @@ def test_negative_speed_rejected(client):
 def test_invalid_heading_rejected(client):
     r = upload(
         client, "test.jpg", make_jpeg(), "image/jpeg",
-        extra={"heading_degrees": 360}
+        extra={"headingDegrees": 360}
     )
     assert r.status_code == 400
 
@@ -282,7 +287,6 @@ def test_failed_upload_leaves_no_partial_file(client, memory_storage):
     media_dir = Path(memory_storage.media_dir)
     count_before = len(list(media_dir.glob("media-*")))
 
-    # Oversized file should fail
     memory_storage._max_bytes = 500
     big = make_jpeg(1024)
     r = upload(client, "test.jpg", big, "image/jpeg")
@@ -292,30 +296,19 @@ def test_failed_upload_leaves_no_partial_file(client, memory_storage):
     assert count_after == count_before
 
 
-def test_delete_media_removes_file(client, memory_storage):
-    r = upload(client, "test.jpg", make_jpeg(), "image/jpeg")
-    d = r.json()
-    media_id = d["mediaId"]
+# --------------------------- Telemetry tests ---------------------------
 
-    r2 = client.delete(f"/api/sentinel/media/{media_id}")
-    assert r2.status_code == 200
-
-    # Verify file is gone
-    stored = asyncio.run(memory_storage.get(media_id))
-    if stored is not None:
-        assert not Path(stored.file_path).exists()
-
-
-def test_telemetry_persisted_when_provided(client):
+def test_telemetry_persisted_with_camelcase_fields(client):
+    """All frontend multipart fields must reach the backend and be persisted."""
     r = upload(
         client, "test.jpg", make_jpeg(), "image/jpeg",
         extra={
             "latitude": 12.9452,
             "longitude": 80.1506,
-            "heading_degrees": 8,
-            "speed_kmh": 42,
-            "captured_at": "2026-06-29T10:00:00Z",
-            "telemetry_source": "live",
+            "headingDegrees": 8,
+            "speedKmh": 42,
+            "capturedAt": "2026-06-29T10:00:00Z",
+            "telemetrySource": "live",
         }
     )
     assert r.status_code == 201
@@ -327,11 +320,161 @@ def test_telemetry_persisted_when_provided(client):
     assert d["telemetry"]["telemetrySource"] == "live"
 
 
-def test_telemetry_missing_when_not_provided(client):
-    r = upload(client, "test.jpg", make_jpeg(), "image/jpeg")
+def test_telemetry_persisted_without_gps(client):
+    """Timestamp and telemetrySource must survive even when location is absent."""
+    r = upload(
+        client, "test.jpg", make_jpeg(), "image/jpeg",
+        extra={
+            "capturedAt": "2026-06-29T10:00:00Z",
+            "telemetrySource": "unavailable",
+        }
+    )
     assert r.status_code == 201
     d = r.json()
-    assert d["telemetry"] is None
+    assert d["telemetry"] is not None
+    assert d["telemetry"]["location"] is None
+    assert d["telemetry"]["headingDegrees"] is None
+    assert d["telemetry"]["speedKmh"] is None
+    assert d["telemetry"]["telemetrySource"] == "unavailable"
+    assert "capturedAt" in d["telemetry"]
+
+
+def test_partial_location_rejected(client):
+    r = upload(
+        client, "test.jpg", make_jpeg(), "image/jpeg",
+        extra={"latitude": 12.9452}
+    )
+    assert r.status_code == 400
+
+
+def test_malformed_captured_at_rejected(client):
+    r = upload(
+        client, "test.jpg", make_jpeg(), "image/jpeg",
+        extra={"capturedAt": "not-a-timestamp"}
+    )
+    assert r.status_code == 400
+
+
+def test_invalid_telemetry_source_rejected(client):
+    r = upload(
+        client, "test.jpg", make_jpeg(), "image/jpeg",
+        extra={"telemetrySource": "spacetime"}
+    )
+    assert r.status_code == 400
+
+
+# --------------------------- Rollback test ---------------------------
+
+@pytest.mark.anyio
+async def test_metadata_failure_removes_final_file(temp_media_dir):
+    """If metadata insertion fails, the final file must be rolled back."""
+    store = LocalMediaStorage(
+        db=None,
+        mongo_reachable=False,
+        media_dir=temp_media_dir,
+        max_bytes=10_485_760,
+    )
+    svc = MediaService(store)
+
+    # Patch metadata insertion to fail after the file move
+    original_set = store._memory_meta.set
+    async def failing_set(media_id, doc):
+        raise RuntimeError("Simulated metadata failure")
+
+    store._memory_meta.set = failing_set
+
+    from io import BytesIO
+
+    async def fake_iter():
+        yield make_jpeg(512)
+
+    media_dir = Path(temp_media_dir)
+    count_before = len(list(media_dir.glob("media-*")))
+
+    with pytest.raises(MediaServiceError):
+        await svc.upload(
+            file_iterator=fake_iter(),
+            mime_type="image/jpeg",
+            extension=".jpg",
+            original_filename="test.jpg",
+        )
+
+    count_after = len(list(media_dir.glob("media-*")))
+    assert count_after == count_before
+
+
+# --------------------------- Default media path test ---------------------------
+
+def test_default_media_dir_resolves_from_backend_path():
+    """The default media directory must be stable and relative to backend source."""
+    assert DEFAULT_MEDIA_DIR.is_absolute()
+    assert DEFAULT_MEDIA_DIR.name == "media"
+    assert "backend" in str(DEFAULT_MEDIA_DIR)
+
+
+# --------------------------- File retrieval safety ---------------------------
+
+def test_missing_physical_file_returns_404(client, memory_storage):
+    """If metadata exists but the file is missing, return 404."""
+    r = upload(client, "test.jpg", make_jpeg(), "image/jpeg")
+    d = r.json()
+    media_id = d["mediaId"]
+
+    # Delete the file manually
+    stored = asyncio.run(memory_storage.get(media_id))
+    if stored:
+        Path(stored.file_path).unlink()
+
+    r2 = client.get(f"/api/sentinel/media/{media_id}/file")
+    assert r2.status_code == 404
+
+
+# --------------------------- Public DELETE route ---------------------------
+
+def test_public_delete_route_absent(client):
+    """The public DELETE endpoint must not exist."""
+    r = client.delete("/api/sentinel/media/media-test")
+    assert r.status_code == 405
+
+
+# --------------------------- Router coexistence ---------------------------
+
+def test_media_and_training_routers_coexist():
+    """Media and training-sample routers must mount without path conflict."""
+    from services.training_sample_service import TrainingSampleService, _InMemoryTrainingStore
+
+    app = FastAPI()
+
+    # Training sample service
+    ts_store = _InMemoryTrainingStore()
+    ts_svc = TrainingSampleService(ts_store, False)
+    app.state.training_sample_service = ts_svc
+
+    # Media service
+    ms_store = LocalMediaStorage(db=None, mongo_reachable=False)
+    ms_svc = MediaService(ms_store)
+    app.state.media_service = ms_svc
+
+    app.include_router(training_samples_router, prefix="/api")
+    app.include_router(media_router, prefix="/api")
+
+    test_client = TestClient(app)
+
+    # Media upload works
+    r1 = test_client.post(
+        "/api/sentinel/media",
+        files={"file": ("test.jpg", BytesIO(make_jpeg()), "image/jpeg")},
+    )
+    assert r1.status_code == 201
+
+    # Training sample stats works
+    r2 = test_client.get("/api/sentinel/training-samples/stats")
+    assert r2.status_code == 200
+    assert "total" in r2.json()
+
+    # Media list works
+    r3 = test_client.get("/api/sentinel/training-samples")
+    assert r3.status_code == 200
 
 
 # --------------------------- Service-level tests ---------------------------
@@ -342,8 +485,6 @@ def test_service_mode_property(memory_storage):
 
 
 def test_service_upload_rejects_invalid_mime(memory_storage):
-    # stream_to_temp does not validate MIME; it only enforces size limits
-    # MIME validation happens in validate_file_type
     with pytest.raises(ValueError):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
             f.write(b"NOTAJPEG")
@@ -352,12 +493,3 @@ def test_service_upload_rejects_invalid_mime(memory_storage):
             memory_storage.validate_file_type("image/jpeg", ".jpg", tmp)
         finally:
             os.unlink(tmp)
-
-
-# --------------------------- Existing routes unaffected ---------------------------
-
-def test_existing_training_sample_routes_still_work(client):
-    # This test is a canary: ensure the media router does not break training routes
-    # The test_app fixture only mounts media routes, so this test is a no-op here.
-    # In full integration, training routes would be mounted too.
-    pass
