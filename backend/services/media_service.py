@@ -73,25 +73,25 @@ class MediaService:
                 pass
             raise MediaServiceError("Empty file")
 
+        # Validate numeric telemetry fields explicitly
+        if heading_degrees is not None and (heading_degrees < 0 or heading_degrees >= 360):
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise MediaServiceError("heading_degrees must be between 0 and 360")
+        if speed_kmh is not None and speed_kmh < 0:
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise MediaServiceError("speed_kmh must be non-negative")
+
         # Build telemetry metadata
         telemetry = None
         if latitude is not None and longitude is not None:
-            # Validate numeric telemetry fields explicitly before model creation
-            if heading_degrees is not None and (heading_degrees < 0 or heading_degrees >= 360):
-                try:
-                    import os
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
-                raise MediaServiceError("heading_degrees must be between 0 and 360")
-            if speed_kmh is not None and speed_kmh < 0:
-                try:
-                    import os
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
-                raise MediaServiceError("speed_kmh must be non-negative")
-
             try:
                 location = MediaLocation(latitude=latitude, longitude=longitude)
             except Exception as e:

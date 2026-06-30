@@ -177,7 +177,7 @@ def test_uploaded_filename_cannot_cause_path_traversal(client, memory_storage):
 def test_file_stored_under_configured_media_dir(client, memory_storage):
     r = upload(client, "test.jpg", make_jpeg(), "image/jpeg")
     d = r.json()
-    stored = memory_storage.get(d["mediaId"])
+    stored = asyncio.run(memory_storage.get(d["mediaId"]))
     assert stored is not None
     assert Path(stored.file_path).resolve().is_relative_to(Path(memory_storage.media_dir).resolve())
 
@@ -301,7 +301,7 @@ def test_delete_media_removes_file(client, memory_storage):
     assert r2.status_code == 200
 
     # Verify file is gone
-    stored = memory_storage.get(media_id)
+    stored = asyncio.run(memory_storage.get(media_id))
     if stored is not None:
         assert not Path(stored.file_path).exists()
 
