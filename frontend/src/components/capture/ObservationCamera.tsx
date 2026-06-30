@@ -14,6 +14,7 @@ export default function ObservationCamera({ onCapture, disabled }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
   const cameraRef = useRef<CameraView>(null);
   const mountedRef = useRef(true);
 
@@ -60,6 +61,21 @@ export default function ObservationCamera({ onCapture, disabled }: Props) {
     setCaptureError(null);
   }, []);
 
+  const handleRequestPermission = useCallback(async () => {
+    setPermissionError(null);
+    try {
+      const result = await requestPermission();
+      if (!mountedRef.current) return;
+      if (!result.granted) {
+        setPermissionError("Camera permission was denied.");
+      }
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setPermissionError(`Permission request failed: ${msg}`);
+    }
+  }, [requestPermission]);
+
   const handleOpenSettings = useCallback(() => {
     Linking.openSettings().catch(() => {});
   }, []);
@@ -84,9 +100,12 @@ export default function ObservationCamera({ onCapture, disabled }: Props) {
         <Text style={styles.permissionText}>
           Camera access is needed to capture road evidence for the dataset.
         </Text>
+        {permissionError && (
+          <Text style={styles.permissionError}>{permissionError}</Text>
+        )}
         {canAskAgain ? (
           <Pressable
-            onPress={requestPermission}
+            onPress={handleRequestPermission}
             style={({ pressed }) => [styles.permissionBtn, pressed && { opacity: 0.85 }]}
             testID="capture-request-permission"
           >
@@ -251,6 +270,12 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginTop: spacing.sm,
     marginBottom: spacing.lg,
+  },
+  permissionError: {
+    color: colors.error,
+    fontSize: 11,
+    textAlign: "center",
+    marginBottom: spacing.md,
   },
   permissionBtn: {
     backgroundColor: colors.brand,

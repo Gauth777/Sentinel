@@ -16,7 +16,7 @@ export default function CaptureObservationScreen() {
   const mountedRef = useRef(true);
 
   // Use the same location hook as Ghost Vision for real telemetry
-  const { location, headingDegrees, speedKmh, mode: locationMode } = useSentinelLocation();
+  const { location, headingDegrees, speedKmh, mode: locationMode, request: requestLocation } = useSentinelLocation();
 
   const [captureState, setCaptureState] = useState<CaptureState>("camera_ready");
   const [capturedMedia, setCapturedMedia] = useState<CapturedMedia | null>(null);
@@ -26,10 +26,11 @@ export default function CaptureObservationScreen() {
 
   useEffect(() => {
     mountedRef.current = true;
+    requestLocation();
     return () => {
       mountedRef.current = false;
     };
-  }, []);
+  }, [requestLocation]);
 
   const safeSetState = useCallback((setter: () => void) => {
     if (mountedRef.current) {
@@ -44,7 +45,7 @@ export default function CaptureObservationScreen() {
         ? { latitude: location.latitude, longitude: location.longitude }
         : null,
       headingDegrees: headingDegrees ?? null,
-      speedKmh: speedKmh && speedKmh > 0 ? speedKmh : null,
+      speedKmh: typeof speedKmh === "number" ? speedKmh : null,
       capturedAt: media.capturedAt,
       telemetrySource: hasLiveLocation ? "live" : "unavailable",
     };

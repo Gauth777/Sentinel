@@ -185,5 +185,9 @@ class MediaService:
             "extension": stored.extension,
         }
 
+    def get_storage_dir(self) -> str:
+        """Return the configured storage directory for path validation."""
+        return str(self._storage.media_dir)
+
     async def delete(self, media_id: str) -> bool:
         return await self._storage.delete(media_id)

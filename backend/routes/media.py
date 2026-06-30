@@ -137,7 +137,7 @@ async def get_media_file(request: Request, media_id: str):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media file not found")
 
     # Security: ensure the resolved file remains inside configured storage
-    storage_dir = Path(svc._storage.media_dir).resolve()
+    storage_dir = Path(svc.get_storage_dir()).resolve()
     resolved_path = Path(file_path).resolve()
     try:
         resolved_path.relative_to(storage_dir)

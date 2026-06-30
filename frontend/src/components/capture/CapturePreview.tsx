@@ -20,6 +20,12 @@ export default function CapturePreview({ media, telemetry, onRetake, onUse, load
       <View style={styles.metaPanel}>
         <Text style={styles.metaTitle}>Image Preview</Text>
         <View style={styles.metaRow}>
+          <Text style={styles.metaLabel}>Capture time</Text>
+          <Text style={styles.metaValue}>
+            {new Date(media.capturedAt).toLocaleString()}
+          </Text>
+        </View>
+        <View style={styles.metaRow}>
           <Text style={styles.metaLabel}>Size</Text>
           <Text style={styles.metaValue}>
             {media.width && media.height ? `${media.width} × ${media.height}` : "Unknown"}
