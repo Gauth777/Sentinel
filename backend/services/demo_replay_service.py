@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from models.demo_replay import DemoReplayManifest, DemoReplaySample, DemoReplayStatus
+from models.demo_replay import DemoReplayManifest, DemoReplaySample
 
 logger = logging.getLogger(__name__)
 
@@ -58,32 +58,62 @@ class DemoReplayService:
         async with self._lock:
             if self._initialized:
                 return
+            self._load_manifest_locked()
+            self._initialized = True
 
-            manifest_path = self._scenario_dir / "manifest.json"
-            if not manifest_path.exists():
-                self._error = f"Manifest not found at {manifest_path}"
-                self._initialized = True
-                logger.info("DemoReplayService: %s", self._error)
-                return
+    def _load_manifest_locked(self) -> None:
+        """Internal helper to load manifest. Must hold lock."""
+        manifest_path = self._scenario_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._error = f"Manifest not found at {manifest_path}"
+            self._manifest = None
+            logger.info("DemoReplayService: %s", self._error)
+            return
 
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._manifest = DemoReplayManifest(**data)
-                self._initialized = True
-                self._error = None
-                logger.info(
-                    "DemoReplayService loaded %d enabled samples",
-                    len(self._manifest.enabled_samples()),
-                )
-            except Exception as e:
-                self._error = f"Invalid manifest: {e}"
-                self._initialized = True
-                logger.error("DemoReplayService: %s", self._error)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._manifest = DemoReplayManifest(**data)
+            self._error = None
+            logger.info(
+                "DemoReplayService loaded %d enabled samples",
+                len(self._manifest.enabled_samples()),
+            )
+        except Exception as e:
+            self._error = f"Invalid manifest: {e}"
+            # Do NOT clear a previously valid manifest on a failed reload/load
+            logger.error("DemoReplayService: %s", self._error)
 
     async def close(self) -> None:
         """No-op for now; reserved for future cleanup."""
         pass
+
+    # ------------------------------------------------------------------
+    # Reload
+    # ------------------------------------------------------------------
+
+    async def reload(self) -> Dict[str, Any]:
+        """Reload the manifest file.
+
+        Resets current_index to 0 on success.
+        If replacement is invalid/missing, preserves previous valid manifest.
+        """
+        async with self._lock:
+            prev_manifest = self._manifest
+            prev_error = self._error
+
+            self._load_manifest_locked()
+            self._initialized = True
+
+            if self._manifest is not None:
+                self._current_index = 0
+            elif prev_manifest is not None:
+                # Revert to previous valid manifest
+                self._manifest = prev_manifest
+                self._error = prev_error
+                logger.warning("Manifest reload failed; preserving previous valid manifest")
+
+            return self._status()
 
     # ------------------------------------------------------------------
     # Status
@@ -105,7 +135,6 @@ class DemoReplayService:
             }
 
         if self._manifest is None:
-            # Manifest missing or invalid
             if self._error and "not found" in self._error.lower():
                 return {
                     "mode": "dataset_replay",

@@ -122,12 +122,25 @@ export default function ReplayWarningPanel({ inference }: ReplayWarningPanelProp
 
             <View style={styles.statusItem}>
               <MaterialCommunityIcons
-                name={activation.warningCreated ? "bell-ring" : "bell-off"}
+                name={activation.warningTextGenerated ? "check-circle" : "minus-circle"}
                 size={14}
-                color={activation.warningCreated ? colors.warning : colors.onSurfaceTertiary}
+                color={activation.warningTextGenerated ? colors.success : colors.onSurfaceTertiary}
               />
               <Text style={styles.statusText}>
-                {activation.warningCreated ? "Cooperative Alert Dispatched" : "No warnings generated"}
+                {activation.warningTextGenerated ? "Warning text prepared" : "No warnings generated"}
+              </Text>
+            </View>
+
+            <View style={styles.statusItem}>
+              <MaterialCommunityIcons
+                name={activation.warningEventCreated ? "bell-ring" : "bell-off"}
+                size={14}
+                color={activation.warningEventCreated ? colors.warning : colors.onSurfaceTertiary}
+              />
+              <Text style={styles.statusText}>
+                {activation.warningEventCreated
+                  ? "Cooperative alert dispatched"
+                  : "No approaching vehicle alert created"}
               </Text>
             </View>
           </View>

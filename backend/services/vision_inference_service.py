@@ -17,6 +17,7 @@ Environment variables:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from typing import Any, Dict, Optional, Protocol, runtime_checkable
 from models.vision_inference import (
     ActivationResult,
     CachedPredictionFile,
+    CachedPredictionValidationError,
     InferenceMode,
     InferenceResult,
     RuntimeHazardPrediction,
@@ -36,6 +38,48 @@ from models.vision_inference import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------ #
+# Helpers                                                            #
+# ------------------------------------------------------------------ #
+
+
+def _compute_inference_id(
+    sample_id: str,
+    model: str,
+    prompt_version: str,
+    inference_mode: InferenceMode,
+    prediction: StructuredRoadPrediction,
+    runtime_hazard: Optional[RuntimeHazardPrediction] = None,
+) -> str:
+    """Compute a deterministic inference fingerprint from validated output.
+
+    Does NOT include API keys, filesystem paths, or base64 image data.
+    """
+    payload = {
+        "sampleId": sample_id,
+        "model": model,
+        "promptVersion": prompt_version,
+        "inferenceMode": inference_mode.value,
+        "prediction": {
+            "roadType": prediction.road_type.value,
+            "trafficDensity": prediction.traffic_density.value,
+            "roadComplexity": prediction.road_complexity.value,
+            "hazardPresence": prediction.hazard_presence.value,
+            "anticipatedRisk": prediction.anticipated_risk.value,
+            "recommendedAction": prediction.recommended_action.value,
+        },
+    }
+    if runtime_hazard is not None:
+        payload["runtimeHazard"] = {
+            "hazardType": runtime_hazard.hazard_type,
+            "hazardDescription": runtime_hazard.hazard_description,
+            "confidence": runtime_hazard.confidence,
+        }
+
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"inf-{digest[:20]}"
 
 # ------------------------------------------------------------------ #
 # Adapter protocol                                                    #
@@ -239,7 +283,16 @@ class OpenAICompatibleQwenAdapter:
                 confidence=parsed.get("confidence"),
             )
 
+        inf_id = _compute_inference_id(
+            sample_id=sample.sample_id,
+            model=self._model,
+            prompt_version=self._prompt_version,
+            inference_mode=InferenceMode.live_qwen,
+            prediction=prediction,
+            runtime_hazard=runtime_hazard,
+        )
         return InferenceResult(
+            inference_id=inf_id,
             sample_id=sample.sample_id,
             model=self._model,
             prompt_version=self._prompt_version,
@@ -270,7 +323,9 @@ class CachedQwenAdapter:
     ) -> InferenceResult:
         cached_path_rel = sample.cached_prediction_path
         if not cached_path_rel:
-            raise FileNotFoundError(f"No cached prediction path configured for sample {sample.sample_id}")
+            raise CachedPredictionValidationError(
+                f"No cached prediction path configured for sample {sample.sample_id}"
+            )
 
         cached_path = self._scenario_dir / cached_path_rel
 
@@ -278,22 +333,50 @@ class CachedQwenAdapter:
         try:
             cached_path.resolve().relative_to(self._scenario_dir.resolve())
         except ValueError:
-            raise FileNotFoundError("Cached prediction path traversal blocked")
+            raise CachedPredictionValidationError("Cached prediction path traversal blocked")
 
         if not cached_path.exists():
-            raise FileNotFoundError(f"Cached prediction file not found: {cached_path_rel}")
+            raise CachedPredictionValidationError(
+                f"Cached prediction file not found for sample {sample.sample_id}"
+            )
 
-        raw = cached_path.read_text(encoding="utf-8")
-        data = json.loads(raw)
+        try:
+            raw = cached_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise CachedPredictionValidationError(
+                f"Malformed cached prediction for sample {sample.sample_id}"
+            ) from exc
 
         # Validate through strict Pydantic schema
-        cached = CachedPredictionFile(**data)
+        try:
+            cached = CachedPredictionFile(**data)
+        except Exception as exc:
+            raise CachedPredictionValidationError(
+                f"Cached prediction validation failed for sample {sample.sample_id}"
+            ) from exc
+
+        # Strict sample_id match
+        if cached.sample_id != sample.sample_id:
+            raise CachedPredictionValidationError(
+                f"Cached prediction sample_id mismatch: "
+                f"expected {sample.sample_id!r}, got {cached.sample_id!r}"
+            )
 
         runtime_hazard = None
         if cached.runtime_hazard:
             runtime_hazard = cached.runtime_hazard
 
+        inf_id = _compute_inference_id(
+            sample_id=sample.sample_id,
+            model=cached.model,
+            prompt_version=cached.prompt_version,
+            inference_mode=InferenceMode.cached_qwen,
+            prediction=cached.prediction,
+            runtime_hazard=runtime_hazard,
+        )
         return InferenceResult(
+            inference_id=inf_id,
             sample_id=sample.sample_id,
             model=cached.model,
             prompt_version=cached.prompt_version,
@@ -343,7 +426,14 @@ class VisionInferenceService:
                 timeout_seconds=timeout,
                 prompt_version=prompt_version,
             )
-            logger.info("Live Qwen adapter configured: model=%s base_url=%s", model, base_url)
+            # Log only the hostname, never query params or credentials
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                safe_origin = f"{parsed.scheme}://{parsed.hostname}"
+            except Exception:
+                safe_origin = "<unparseable>"
+            logger.info("Live Qwen adapter configured: model=%s host=%s", model, safe_origin)
         else:
             self._live_adapter = None
             if enabled:
@@ -373,7 +463,11 @@ class VisionInferenceService:
                 )
                 return result
             except Exception as e:
-                logger.warning("Live Qwen failed for %s: %s — falling back to cached", sample.sample_id, e)
+                logger.warning(
+                    "Live Qwen failed for %s: %s — falling back to cached",
+                    sample.sample_id,
+                    type(e).__name__,
+                )
 
         # Try cached
         try:
@@ -381,9 +475,11 @@ class VisionInferenceService:
             logger.info("Cached Qwen prediction loaded for %s", sample.sample_id)
             return result
         except Exception as e:
-            logger.error("Cached prediction also failed for %s: %s", sample.sample_id, e)
+            logger.error(
+                "Cached prediction also failed for %s: %s",
+                sample.sample_id,
+                type(e).__name__,
+            )
             raise RuntimeError(
-                f"Inference failed for sample {sample.sample_id}: "
-                f"live adapter {'not configured' if self._live_adapter is None else 'failed'}, "
-                f"cached prediction failed: {e}"
+                f"Inference unavailable for sample {sample.sample_id}"
             ) from e

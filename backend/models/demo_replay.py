@@ -175,3 +175,82 @@ class DemoReplayStatus(BaseModel):
     current_index: int
     current_sample_id: Optional[str] = None
     loop: bool
+
+
+# --------------- Public API response models (camelCase) ---------------
+
+
+class DemoReplayPublicSample(BaseModel):
+    """Safe public sample metadata — no filesystem paths or expected labels."""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    sample_id: str
+    sequence_index: int
+    title: str
+    description: str
+    dashcam_url: str
+    topview_url: str
+    location: Optional[DemoLocation] = None
+    heading_degrees: Optional[float] = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class DemoReplayStatusResponse(BaseModel):
+    """GET /api/sentinel/demo-replay"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    mode: str = "dataset_replay"
+    status: str
+    sample_count: int
+    current_index: int
+    current_sample_id: Optional[str] = None
+    loop: bool
+
+
+class DemoReplayCurrentResponse(BaseModel):
+    """GET /api/sentinel/demo-replay/current"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    mode: str = "dataset_replay"
+    sample: DemoReplayPublicSample
+    sample_count: int
+    current_index: int
+    has_next: bool
+
+
+class DemoReplayAdvanceResponse(BaseModel):
+    """POST /api/sentinel/demo-replay/advance"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    previous_sample_id: str
+    sample: DemoReplayPublicSample
+    current_index: int
+    looped: bool
+    sample_count: int
+
+
+class DemoReplayResetResponse(BaseModel):
+    """POST /api/sentinel/demo-replay/reset"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    sample: DemoReplayPublicSample
+    current_index: int
+    sample_count: int
+
+
+class DemoReplayReloadResponse(BaseModel):
+    """POST /api/sentinel/demo-replay/reload"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    mode: str = "dataset_replay"
+    status: str
+    sample_count: int
+    current_index: int
+    current_sample_id: Optional[str] = None
+    loop: bool

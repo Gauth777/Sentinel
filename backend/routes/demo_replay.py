@@ -9,6 +9,7 @@ Endpoints:
   GET  /api/sentinel/demo-replay/samples/{sample_id}/topview
   POST /api/sentinel/demo-replay/advance
   POST /api/sentinel/demo-replay/reset
+  POST /api/sentinel/demo-replay/reload
   POST /api/sentinel/demo-replay/samples/{sample_id}/infer
 """
 from __future__ import annotations
@@ -22,11 +23,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.status import (
     HTTP_404_NOT_FOUND,
-    HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_422_UNPROCESSABLE_CONTENT,
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from models.demo_replay import (
+    DemoReplayAdvanceResponse,
+    DemoReplayCurrentResponse,
+    DemoReplayPublicSample,
+    DemoReplayReloadResponse,
+    DemoReplayResetResponse,
+    DemoReplayStatusResponse,
+)
+from models.vision_inference import ActivationPublicResponse
 from services.demo_replay_service import DemoReplayService
 
 logger = logging.getLogger(__name__)
@@ -40,34 +50,36 @@ def _get_replay_service(request: Request) -> DemoReplayService:
     return svc  # type: ignore[return-value]
 
 
-@router.get("")
+@router.get("", response_model=DemoReplayStatusResponse)
 async def get_status(request: Request):
     svc = _get_replay_service(request)
-    return await svc.status()
+    result = await svc.status()
+    return DemoReplayStatusResponse(**result)
 
 
 @router.get("/samples")
 async def list_samples(request: Request):
     svc = _get_replay_service(request)
-    return await svc.list_samples()
+    items = await svc.list_samples()
+    return [DemoReplayPublicSample(**s) for s in items]
 
 
-@router.get("/current")
+@router.get("/current", response_model=DemoReplayCurrentResponse)
 async def get_current(request: Request):
     svc = _get_replay_service(request)
     result = await svc.get_current()
     if result is None:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="Replay not configured")
-    return result
+    return DemoReplayCurrentResponse(**result)
 
 
-@router.get("/samples/{sample_id}")
+@router.get("/samples/{sample_id}", response_model=DemoReplayPublicSample)
 async def get_sample(request: Request, sample_id: str):
     svc = _get_replay_service(request)
     result = await svc.get_sample(sample_id)
     if result is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Sample not found")
-    return result
+    return DemoReplayPublicSample(**result)
 
 
 @router.get("/samples/{sample_id}/dashcam")
@@ -88,22 +100,29 @@ async def get_topview(request: Request, sample_id: str):
     return FileResponse(path=info["path"], media_type=info["mime_type"])
 
 
-@router.post("/advance")
+@router.post("/advance", response_model=DemoReplayAdvanceResponse)
 async def advance(request: Request):
     svc = _get_replay_service(request)
     result = await svc.advance()
     if result is None:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="Replay not configured")
-    return result
+    return DemoReplayAdvanceResponse(**result)
 
 
-@router.post("/reset")
+@router.post("/reset", response_model=DemoReplayResetResponse)
 async def reset(request: Request):
     svc = _get_replay_service(request)
     result = await svc.reset()
     if result is None:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="Replay not configured")
-    return result
+    return DemoReplayResetResponse(**result)
+
+
+@router.post("/reload", response_model=DemoReplayReloadResponse)
+async def reload(request: Request):
+    svc = _get_replay_service(request)
+    result = await svc.reload()
+    return DemoReplayReloadResponse(**result)
 
 
 # ------------------------------------------------------------------ #
@@ -138,7 +157,7 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
     if dashcam_info is None or topview_info is None:
         raise HTTPException(
             status_code=HTTP_404_NOT_FOUND,
-            detail="Sample images not found on disk",
+            detail="Sample images not found",
         )
 
     dashcam_path = Path(dashcam_info["path"])
@@ -155,13 +174,14 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
     # Run inference
     try:
         result = await inference_svc.infer(sample, dashcam_path, topview_path)
-    except RuntimeError as e:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
-        logger.error("Inference error for %s: %s", sample_id, e)
+        logger.error("Inference error for %s: %s", sample_id, type(e).__name__)
         raise HTTPException(
-            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Inference failed: {e}",
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "INFERENCE_UNAVAILABLE",
+                "message": "Inference is unavailable for this sample.",
+            },
         )
 
     # Build safe prediction response (camelCase)
@@ -205,29 +225,24 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
                 }
 
             activation = await activate_inference(result, location)
-            response["activation"] = {
-                "activated": activation.activated,
-                "reason": activation.reason,
-                "observationId": activation.observation_id,
-                "hazardId": activation.hazard_id,
-                "warningCreated": activation.warning_created,
-            }
+            response["activation"] = ActivationPublicResponse(
+                activated=activation.activated,
+                reason=activation.reason,
+                observation_id=activation.observation_id,
+                hazard_id=activation.hazard_id,
+                warning_text_generated=activation.warning_text_generated,
+                warning_event_created=activation.warning_event_created,
+            ).model_dump(by_alias=True)
         except Exception as e:
-            logger.error("Activation failed for %s: %s", sample_id, e)
-            response["activation"] = {
-                "activated": False,
-                "reason": f"activation_error: {e}",
-                "observationId": None,
-                "hazardId": None,
-                "warningCreated": False,
-            }
+            logger.error("Activation failed for %s: %s", sample_id, type(e).__name__)
+            response["activation"] = ActivationPublicResponse(
+                activated=False,
+                reason="activation_failed",
+            ).model_dump(by_alias=True)
     else:
-        response["activation"] = {
-            "activated": False,
-            "reason": "activation_not_requested",
-            "observationId": None,
-            "hazardId": None,
-            "warningCreated": False,
-        }
+        response["activation"] = ActivationPublicResponse(
+            activated=False,
+            reason="activation_not_requested",
+        ).model_dump(by_alias=True)
 
     return response

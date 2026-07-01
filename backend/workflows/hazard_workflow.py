@@ -169,6 +169,13 @@ class LocalWorkflowRunner(WorkflowRunner):
             distance_to_ego = int(calculate_distance(lat, lon, ego_lat, ego_lon))
             
             rec_action = "Reduce speed" if obs_type == "stationary_vehicle" else "Move left" if obs_type == "pothole" else "Exercise caution"
+            risk_level = "high" if obs_type == "stationary_vehicle" else "medium"
+
+            # Use replay provenance metadata when available
+            replay_meta = obs.get("_replay_meta")
+            if replay_meta:
+                rec_action = replay_meta.get("recommendedAction", rec_action)
+                risk_level = replay_meta.get("risk", risk_level)
             warnings = WarningService.generate_warning_texts(obs_type, distance_to_ego, rec_action)
             
             new_hazard = {
@@ -183,7 +190,7 @@ class LocalWorkflowRunner(WorkflowRunner):
                 "observedSecondsAgo": 0,
                 "direction": "Northbound lane",
                 "recommendedAction": rec_action,
-                "risk": "high" if obs_type == "stationary_vehicle" else "medium",
+                "risk": risk_level,
                 "visibilityState": "hidden",
                 "sourceType": "shared_vehicle",
                 "routeRelevance": "high" if distance_to_ego < 250 else "medium",
@@ -196,6 +203,14 @@ class LocalWorkflowRunner(WorkflowRunner):
                 "updated_at": current_time,
                 "warnings": warnings
             }
+            # Persist replay provenance fields on the hazard
+            if replay_meta:
+                new_hazard["model"] = replay_meta.get("model")
+                new_hazard["inferenceMode"] = replay_meta.get("inferenceMode")
+                new_hazard["sampleId"] = replay_meta.get("sampleId")
+                new_hazard["lastInferenceId"] = replay_meta.get("lastInferenceId")
+                if replay_meta.get("confidence") is not None:
+                    new_hazard["replayConfidence"] = replay_meta["confidence"]
             await db.hazards.replace_one({"id": hazard_id}, new_hazard, upsert=True)
             result_hazard = new_hazard
 
@@ -252,6 +267,7 @@ class LocalWorkflowRunner(WorkflowRunner):
 
         # 8. Find Approaching Vehicles & Generate Warning Events
         # Let's say all nearby vehicles are approaching their respective segments
+        warning_events = []
         try:
             nearby_vehicles = await db.nearby_vehicles.find({}).to_list(100)
             for vehicle in nearby_vehicles:
@@ -267,6 +283,7 @@ class LocalWorkflowRunner(WorkflowRunner):
                     # Create WarningEvent
                     warning_text = result_hazard["warnings"]["en"]
                     warning_id = f"wrn-{obs_id}-{v_id}"
+                    warning_events.append(warning_id)
                     
                     # 8b. Record warning in the perception graph (secondary, non-fatal)
                     try:
@@ -297,4 +314,6 @@ class LocalWorkflowRunner(WorkflowRunner):
         # Remove internal fields before returning
         return_dict = dict(result_hazard)
         return_dict.pop("_id", None)
+        # Attach warning event IDs for activation service
+        return_dict["_warning_events"] = warning_events
         return return_dict

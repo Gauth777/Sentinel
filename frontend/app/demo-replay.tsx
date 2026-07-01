@@ -97,13 +97,44 @@ export default function DemoReplayScreen() {
     }
   };
 
+  const handleReload = async () => {
+    if (loading || actionLoading || inferenceLoading || isAdvancing) return;
+    setLoading(true);
+    setErrorText(null);
+    try {
+      const statusRes = await demoReplayApi.reload();
+      if (!isMounted.current) return;
+      setStatus(statusRes);
+
+      if (statusRes.status === "ready") {
+        const currentRes = await demoReplayApi.getCurrent();
+        if (!isMounted.current) return;
+        if (currentRes) {
+          setCurrentSample(currentRes.sample);
+          setSampleCount(currentRes.sampleCount);
+          setCurrentIndex(currentRes.currentIndex);
+        }
+      } else {
+        setCurrentSample(null);
+      }
+    } catch (err: unknown) {
+      if (isMounted.current) {
+        setErrorText(getErrorMessage(err));
+      }
+    } finally {
+      if (isMounted.current) {
+        setLoading(false);
+      }
+    }
+  };
+
   useEffect(() => {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleRunInference = async () => {
-    if (!currentSample || inferenceLoading || isAdvancing || actionLoading) return;
+    if (!currentSample || inferenceLoading || isAdvancing || actionLoading || loading) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     setInferenceLoading(true);
     setErrorText(null);
@@ -124,7 +155,7 @@ export default function DemoReplayScreen() {
   };
 
   const handleAdvance = async () => {
-    if (isAdvancing || actionLoading || inferenceLoading) return;
+    if (isAdvancing || actionLoading || inferenceLoading || loading) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setIsAdvancing(true);
     setInferenceResult(null); // Clear previous UI
@@ -168,7 +199,7 @@ export default function DemoReplayScreen() {
   };
 
   const handleReset = async () => {
-    if (actionLoading || isAdvancing || inferenceLoading) return;
+    if (actionLoading || isAdvancing || inferenceLoading || loading) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setActionLoading(true);
     setInferenceResult(null);
@@ -216,7 +247,7 @@ export default function DemoReplayScreen() {
           <MaterialCommunityIcons name="alert-octagon" size={48} color={colors.error} />
           <Text style={styles.errorTitle}>SYSTEM ERROR</Text>
           <Text style={styles.errorDescription}>{errorText}</Text>
-          <Pressable style={styles.retryButton} onPress={loadData}>
+          <Pressable style={styles.retryButton} onPress={handleReload}>
             <Text style={styles.retryButtonText}>RETRY CONNECTION</Text>
           </Pressable>
         </View>
@@ -233,7 +264,7 @@ export default function DemoReplayScreen() {
             <Text style={styles.codeText}>backend/demo_scenarios/sample_001/...</Text>{"\n"}
             and configure a valid <Text style={styles.codeText}>manifest.json</Text>.
           </Text>
-          <Pressable style={styles.retryButton} onPress={loadData}>
+          <Pressable style={styles.retryButton} onPress={handleReload}>
             <Text style={styles.retryButtonText}>CHECK STATUS AGAIN</Text>
           </Pressable>
         </View>
@@ -248,7 +279,7 @@ export default function DemoReplayScreen() {
           <Text style={styles.errorDescription}>
             The manifest file is present but failed validation checks (e.g. duplicate indexes, absolute paths, unsafe characters).
           </Text>
-          <Pressable style={styles.retryButton} onPress={loadData}>
+          <Pressable style={styles.retryButton} onPress={handleReload}>
             <Text style={styles.retryButtonText}>RELOAD MANIFEST</Text>
           </Pressable>
         </View>

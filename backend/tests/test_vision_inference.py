@@ -19,6 +19,7 @@ if backend_dir not in sys.path:
 
 from models.vision_inference import (
     CachedPredictionFile,
+    CachedPredictionValidationError,
     InferenceMode,
     InferenceResult,
     RuntimeHazardPrediction,
@@ -27,6 +28,7 @@ from models.vision_inference import (
 from services.vision_inference_service import (
     CachedQwenAdapter,
     VisionInferenceService,
+    _compute_inference_id,
     _extract_content_text,
     _extract_json_from_text,
 )
@@ -130,19 +132,24 @@ def test_structured_prediction_rejects_extra_fields():
 
 
 def test_inference_result_excludes_raw_response():
+    pred = StructuredRoadPrediction(
+        road_type="highway",
+        traffic_density="low",
+        road_complexity="simple",
+        hazard_presence="no",
+        anticipated_risk="low",
+        recommended_action="maintain_speed",
+    )
+    inf_id = _compute_inference_id(
+        "s1", "test", "v1", InferenceMode.cached_qwen, pred,
+    )
     result = InferenceResult(
+        inference_id=inf_id,
         sample_id="s1",
         model="test",
         prompt_version="v1",
         inference_mode=InferenceMode.cached_qwen,
-        prediction=StructuredRoadPrediction(
-            road_type="highway",
-            traffic_density="low",
-            road_complexity="simple",
-            hazard_presence="no",
-            anticipated_risk="low",
-            recommended_action="maintain_speed",
-        ),
+        prediction=pred,
         latency_ms=0,
         raw_response="SECRET_RAW_DATA",
     )
@@ -246,7 +253,7 @@ async def test_cached_prediction_missing_file():
         adapter = CachedQwenAdapter(scenario_dir)
         sample = FakeSample("s1", cached_prediction_path="s1/cached_prediction.json")
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(CachedPredictionValidationError):
             await adapter.predict(
                 sample,
                 Path(tmpdir) / "dashcam.jpg",
@@ -261,7 +268,7 @@ async def test_cached_prediction_no_path_configured():
         adapter = CachedQwenAdapter(scenario_dir)
         sample = FakeSample("s1", cached_prediction_path=None)
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(CachedPredictionValidationError):
             await adapter.predict(
                 sample,
                 Path(tmpdir) / "dashcam.jpg",
@@ -276,7 +283,7 @@ async def test_cached_prediction_traversal_blocked():
         adapter = CachedQwenAdapter(scenario_dir)
         sample = FakeSample("s1", cached_prediction_path="../../etc/passwd")
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(CachedPredictionValidationError):
             await adapter.predict(
                 sample,
                 Path(tmpdir) / "dashcam.jpg",
@@ -327,7 +334,7 @@ async def test_service_no_live_no_cache_returns_error():
             svc = VisionInferenceService(scenario_dir)
             sample = FakeSample("s1", cached_prediction_path=None)
 
-            with pytest.raises(RuntimeError, match="Inference failed"):
+            with pytest.raises(RuntimeError, match="Inference unavailable"):
                 await svc.infer(
                     sample,
                     Path(tmpdir) / "dashcam.jpg",
@@ -346,19 +353,25 @@ async def test_service_live_success_returns_live_mode():
             svc = VisionInferenceService(scenario_dir)
 
             # Inject a mock live adapter
+            pred = StructuredRoadPrediction(
+                road_type="highway",
+                traffic_density="low",
+                road_complexity="simple",
+                hazard_presence="no",
+                anticipated_risk="low",
+                recommended_action="maintain_speed",
+            )
+            inf_id = _compute_inference_id(
+                "s1", "Qwen2.5-VL-7B-Instruct", "v1",
+                InferenceMode.live_qwen, pred,
+            )
             mock_result = InferenceResult(
+                inference_id=inf_id,
                 sample_id="s1",
                 model="Qwen2.5-VL-7B-Instruct",
                 prompt_version="v1",
                 inference_mode=InferenceMode.live_qwen,
-                prediction=StructuredRoadPrediction(
-                    road_type="highway",
-                    traffic_density="low",
-                    road_complexity="simple",
-                    hazard_presence="no",
-                    anticipated_risk="low",
-                    recommended_action="maintain_speed",
-                ),
+                prediction=pred,
                 latency_ms=1500,
             )
             mock_adapter = AsyncMock()
@@ -465,19 +478,24 @@ def test_expected_labels_never_used_automatically():
 
 def test_api_key_not_in_result():
     """API keys must never appear in inference results."""
+    pred = StructuredRoadPrediction(
+        road_type="highway",
+        traffic_density="low",
+        road_complexity="simple",
+        hazard_presence="no",
+        anticipated_risk="low",
+        recommended_action="maintain_speed",
+    )
+    inf_id = _compute_inference_id(
+        "s1", "test", "v1", InferenceMode.live_qwen, pred,
+    )
     result = InferenceResult(
+        inference_id=inf_id,
         sample_id="s1",
         model="test",
         prompt_version="v1",
         inference_mode=InferenceMode.live_qwen,
-        prediction=StructuredRoadPrediction(
-            road_type="highway",
-            traffic_density="low",
-            road_complexity="simple",
-            hazard_presence="no",
-            anticipated_risk="low",
-            recommended_action="maintain_speed",
-        ),
+        prediction=pred,
         latency_ms=100,
         raw_response='{"key": "sk-secret-value"}',
     )

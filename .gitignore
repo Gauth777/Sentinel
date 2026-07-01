@@ -88,3 +88,7 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+
+# Emergent workspace files
+.emergent/
+
