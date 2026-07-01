@@ -80,8 +80,10 @@ When inference detects a hazard (`hazard_presence: "yes"`):
 1. **Observation Mapping**: Creates a Sentinel observation with identifier `obs-replay-{sample_id}-{inference_id}`.
 2. **Observer Vehicle**: Attributed to vehicle `v-replay-observer` ("Sentinel Dataset Observer").
 3. **Workflow Runner**: Feeds the observation into `LocalWorkflowRunner` to create/update the active hazard.
-4. **Idempotency**: Repeated activation requests for the same sample and inference ID retrieve the existing result instead of creating duplicates.
-5. **Warnings & Neo4j**: Triggers multilingual driver warnings, records nodes in the perception provenance graph, and links approaching vehicles.
+4. **Deterministic Inference IDs**: Inference IDs are computed from the canonical prediction output (including `warningText`), not timestamps or random values.
+5. **Idempotency**: Repeated activation requests for the same inference ID retrieve the stored result. Per-inference locking prevents concurrent duplicate workflow executions.
+6. **Warning Semantics**: `warningTextGenerated` indicates multilingual warning strings were created. `warningEventCreated` indicates at least one warning was successfully persisted to the perception graph or Neo4j. These are independent booleans.
+7. **Neo4j & Graph**: Records nodes in the perception provenance graph and links approaching vehicles.
 
 ---
 
@@ -97,6 +99,7 @@ Replay routes are prefixed under `/api/sentinel/demo-replay`:
 - `GET /api/sentinel/demo-replay/samples/{sample_id}/topview` — Serve top-view map.
 - `POST /api/sentinel/demo-replay/advance` — Move pointer to next enabled sample (loops back).
 - `POST /api/sentinel/demo-replay/reset` — Reset pointer to first sample.
+- `POST /api/sentinel/demo-replay/reload` — Re-read manifest.json and refresh sample list without server restart.
 - `POST /api/sentinel/demo-replay/samples/{sample_id}/infer` — Run structured VLM inference. Optional body parameter: `{"activate": true}` (default: true).
 
 ---
@@ -109,6 +112,8 @@ To ensure accurate and scientific representation of this work during evaluations
 - **No Continuous Online Learning**: The VLM does not update or learn continuously in-context.
 - **Model Training**: Sentinel does not train Qwen from scratch; it utilizes instruction-tuned models for structured reasoning.
 - **Inference Badges**: Distinguish clearly between `LIVE QWEN` and `CACHED QWEN FALLBACK` responses in the console.
+- **Cached Output Is Not Live Output**: Cached predictions are pre-calculated and validated offline. They do not represent live model responses.
+- **Private Replay Assets**: A cloned public repository starts unconfigured. Real research images and cached prediction files are intentionally excluded from version control.
 
 ---
 

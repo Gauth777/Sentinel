@@ -81,9 +81,12 @@ They are **not** model predictions. They should not be confused with VLM output.
 
 ## cached_prediction.json
 
-Reserved for tomorrow's Qwen integration phase.
+Cached predictions are the deterministic fallback when live Qwen inference is unavailable or fails.
 
-If present, it may be used to show cached inference results without calling the live model.
+- Cached files **must** contain `"validated": true`.
+- `sampleId` in the cached file **must** match the manifest sample.
+- `expectedLabels` are research ground truth for evaluation and are **never** used as a prediction fallback.
+- Cached mode is displayed as **CACHED QWEN FALLBACK** in the replay console.
 
 ## Replay behaviour
 
@@ -98,6 +101,19 @@ If present, it may be used to show cached inference results without calling the 
 - Do not include identifiable faces or licence plates without consent.
 - Blur or exclude sensitive content before adding.
 
-## Automatic hazard generation
+## Hazard activation
 
-No automatic hazard generation exists yet. Hazards must be created through the existing Ghost Vision observer workflow.
+- `hazardPresence=yes` can activate the existing Sentinel hazard workflow.
+- Activation creates an observation and may create/update a hazard.
+- Warning text generation and warning-event dispatch are separate:
+  - `warningTextGenerated` indicates multilingual warning strings were created.
+  - `warningEventCreated` indicates at least one warning was successfully recorded in the perception graph or Neo4j.
+- Activation is idempotent by deterministic inference ID.
+
+## Manifest reload
+
+`POST /api/sentinel/demo-replay/reload` re-reads `manifest.json` and refreshes the sample list without restarting the server.
+
+## Public repository note
+
+A cloned public repository starts unconfigured because real research images and cached prediction files are intentionally ignored by `.gitignore`.

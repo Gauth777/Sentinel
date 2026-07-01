@@ -75,6 +75,7 @@ def _compute_inference_id(
             "hazardType": runtime_hazard.hazard_type,
             "hazardDescription": runtime_hazard.hazard_description,
             "confidence": runtime_hazard.confidence,
+            "warningText": runtime_hazard.warning_text,
         }
 
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))

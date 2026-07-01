@@ -87,19 +87,45 @@ def make_inference_result(
 SAMPLE_LOCATION = {"latitude": 12.9452, "longitude": 80.1506}
 
 
+def _make_mock_db():
+    """Create a mock db with replay_activations collection that behaves like MOCK_DB_STATE."""
+    store = {}
+
+    async def find_one(query, projection=None):
+        iid = query.get("inferenceId")
+        doc = store.get(iid)
+        if doc and projection and "_id" in projection and projection["_id"] == 0:
+            doc = {k: v for k, v in doc.items() if k != "_id"}
+        return doc
+
+    async def replace_one(query, record, upsert=False):
+        iid = query.get("inferenceId")
+        if iid in store or upsert:
+            store[iid] = dict(record)
+
+    collection = MagicMock()
+    collection.find_one = AsyncMock(side_effect=find_one)
+    collection.replace_one = AsyncMock(side_effect=replace_one)
+
+    mock_db = MagicMock()
+    mock_db.replay_activations = collection
+    mock_db._replay_store = store  # exposed for test assertions
+    return mock_db
+
+
 # ----------------------------- Fixtures -----------------------------
 
 
 @pytest.fixture(autouse=True)
 def fresh_store():
-    """Create a fresh in-memory store for each test."""
+    """Create a fresh in-memory store for each test (db=None fallback)."""
     store = ReplayActivationStore()
     set_store(store)
     yield store
     set_store(ReplayActivationStore())
 
 
-# ----------------------------- Tests -----------------------------
+# ----------------------------- Core Tests -----------------------------
 
 
 @pytest.mark.anyio
@@ -199,7 +225,7 @@ async def test_duplicate_activation_is_idempotent():
 
 @pytest.mark.anyio
 async def test_concurrent_activation_prevented():
-    """Concurrent activations for the same inference should only create one observation."""
+    """Concurrent activations for the same inference should invoke workflow exactly once."""
     mock_hazard = {
         "id": "hz-conc",
         "type": "crossing_vehicle",
@@ -222,9 +248,19 @@ async def test_concurrent_activation_prevented():
             activate_inference(result, SAMPLE_LOCATION),
             activate_inference(result, SAMPLE_LOCATION),
         )
-        obs_ids = {a.observation_id for a in activations if a.observation_id}
+
+        # 2D. Assert workflow is called exactly once
+        assert mock_runner.process_observation.call_count == 1
+
         # All should report the same observation
+        obs_ids = {a.observation_id for a in activations if a.observation_id}
         assert len(obs_ids) == 1
+
+        # Exactly one activation record in backing store
+        store = get_store()
+        existing = await store.get(result.inference_id)
+        assert existing is not None
+        assert existing["activated"] is True
 
 
 @pytest.mark.anyio
@@ -379,9 +415,15 @@ async def test_replay_meta_passed_to_observation():
         assert meta["lastInferenceId"] == result.inference_id
 
 
+# ----------------------------- 2E: Persistence across store recreation (shared mock db) -------------
+
+
 @pytest.mark.anyio
 async def test_service_recreation_preserves_activation():
-    """Creating a new store with same backing data preserves activation state."""
+    """Creating a new store with the same shared mock db preserves activation state.
+    Does NOT share _mem manually — uses a shared mock database object."""
+    shared_db = _make_mock_db()
+
     mock_hazard = {
         "id": "hz-persist",
         "type": "test",
@@ -393,10 +435,8 @@ async def test_service_recreation_preserves_activation():
     mock_runner = MagicMock()
     mock_runner.process_observation = AsyncMock(return_value=mock_hazard)
 
-    # Shared backing dict simulates shared db
-    shared_mem: dict = {}
-    store1 = ReplayActivationStore()
-    store1._mem = shared_mem
+    # First store with shared db
+    store1 = ReplayActivationStore(shared_db)
     set_store(store1)
 
     with patch(
@@ -407,16 +447,39 @@ async def test_service_recreation_preserves_activation():
         a1 = await activate_inference(result, SAMPLE_LOCATION)
         assert a1.activated is True
 
-    # Recreate store with same backing memory
-    store2 = ReplayActivationStore()
-    store2._mem = shared_mem
+    # Second store with same shared db (simulates service recreation)
+    store2 = ReplayActivationStore(shared_db)
     set_store(store2)
 
     a2 = await activate_inference(result, SAMPLE_LOCATION)
     assert a2.activated is True
     assert a2.observation_id == a1.observation_id
-    # Workflow should NOT be called again
+    # Workflow should NOT be called again — persisted in shared db
     assert mock_runner.process_observation.call_count == 1
+
+    # Exactly one replay_activations document exists
+    assert len(shared_db._replay_store) == 1
+
+
+# ----------------------------- 2E supplement: internal dict only when db is None ----
+
+
+@pytest.mark.anyio
+async def test_internal_dict_used_only_when_db_none():
+    """When db=None, internal dict is used. When db is provided, db collections are used."""
+    # db=None: should use internal dict
+    store_no_db = ReplayActivationStore()
+    await store_no_db.put("test-id", {"inferenceId": "test-id", "activated": True})
+    assert "test-id" in store_no_db._mem
+
+    # db provided: should use db.replay_activations
+    mock_db = _make_mock_db()
+    store_with_db = ReplayActivationStore(mock_db)
+    await store_with_db.put("test-id-2", {"inferenceId": "test-id-2", "activated": True})
+    # Internal dict should remain empty
+    assert len(store_with_db._mem) == 0
+    # DB should have the record
+    assert "test-id-2" in mock_db._replay_store
 
 
 @pytest.mark.anyio

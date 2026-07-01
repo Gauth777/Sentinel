@@ -92,3 +92,11 @@ credentials.json
 # Emergent workspace files
 .emergent/
 
+# Mobile signing and service credentials
+*.jks
+*.keystore
+*.p12
+*.pfx
+google-services.json
+GoogleService-Info.plist
+service-account*.json

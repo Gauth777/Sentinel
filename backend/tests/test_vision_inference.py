@@ -504,3 +504,75 @@ def test_api_key_not_in_result():
     assert "sk-secret" not in dumped_json
     assert "raw_response" not in dumped
 
+
+# ----------------------------- PATCH 5: warningText in inference fingerprint ----
+
+
+def test_warning_text_participates_in_inference_id():
+    """Identical warningText produces identical inference ID."""
+    pred = StructuredRoadPrediction(
+        road_type="urban_arterial",
+        traffic_density="high",
+        road_complexity="complex",
+        hazard_presence="yes",
+        anticipated_risk="high",
+        recommended_action="slow_down",
+    )
+    hazard = RuntimeHazardPrediction(
+        hazard_type="crossing_vehicle",
+        hazard_description="Vehicle crossing",
+        confidence=0.8,
+        warning_text="Caution: vehicle crossing ahead",
+    )
+    id1 = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard)
+    id2 = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard)
+    assert id1 == id2
+
+
+def test_different_warning_text_changes_inference_id():
+    """Changed warningText produces a different inference ID."""
+    pred = StructuredRoadPrediction(
+        road_type="urban_arterial",
+        traffic_density="high",
+        road_complexity="complex",
+        hazard_presence="yes",
+        anticipated_risk="high",
+        recommended_action="slow_down",
+    )
+    hazard_a = RuntimeHazardPrediction(
+        hazard_type="crossing_vehicle",
+        hazard_description="Vehicle crossing",
+        confidence=0.8,
+        warning_text="Caution: vehicle crossing ahead",
+    )
+    hazard_b = RuntimeHazardPrediction(
+        hazard_type="crossing_vehicle",
+        hazard_description="Vehicle crossing",
+        confidence=0.8,
+        warning_text="Warning: different text",
+    )
+    id_a = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard_a)
+    id_b = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard_b)
+    assert id_a != id_b
+
+
+def test_warning_text_none_is_deterministic():
+    """warningText=None produces a deterministic ID."""
+    pred = StructuredRoadPrediction(
+        road_type="urban_arterial",
+        traffic_density="high",
+        road_complexity="complex",
+        hazard_presence="yes",
+        anticipated_risk="high",
+        recommended_action="slow_down",
+    )
+    hazard = RuntimeHazardPrediction(
+        hazard_type="crossing_vehicle",
+        hazard_description="Vehicle crossing",
+        confidence=0.8,
+        warning_text=None,
+    )
+    id1 = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard)
+    id2 = _compute_inference_id("s1", "test", "v1", InferenceMode.cached_qwen, pred, hazard)
+    assert id1 == id2
+    assert id1.startswith("inf-")
