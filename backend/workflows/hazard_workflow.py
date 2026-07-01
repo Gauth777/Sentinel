@@ -114,6 +114,16 @@ class LocalWorkflowRunner(WorkflowRunner):
         # 5. Create/Update Hazard & Recalculate Confidence
         hazard_id = None
         is_new = False
+
+        # Replay provenance metadata (used in both match and create branches)
+        replay_meta = obs.get("_replay_meta")
+
+        # Risk ranking for strengthening rule (risk can increase, never decrease)
+        RISK_RANK = {
+            "low": 0,
+            "medium": 1,
+            "high": 2,
+        }
         
         if matched_hazard:
             hazard_id = matched_hazard["id"]
@@ -140,8 +150,32 @@ class LocalWorkflowRunner(WorkflowRunner):
             matched_hazard["confidence"] = confidence
             matched_hazard["updated_at"] = current_time
             matched_hazard["observedSecondsAgo"] = 0
+
+            # Apply replay provenance metadata to matched hazard
+            if replay_meta:
+                supplied_action = replay_meta.get("recommendedAction")
+                if supplied_action:
+                    matched_hazard["recommendedAction"] = supplied_action
+
+                supplied_risk = replay_meta.get("risk")
+                if supplied_risk and supplied_risk in RISK_RANK:
+                    existing_risk = matched_hazard.get("risk")
+                    if existing_risk not in RISK_RANK:
+                        # Existing risk is missing/invalid, set it
+                        matched_hazard["risk"] = supplied_risk
+                    elif RISK_RANK[supplied_risk] >= RISK_RANK[existing_risk]:
+                        # Only increase or maintain, never decrease
+                        matched_hazard["risk"] = supplied_risk
+
+                for key in ("model", "inferenceMode", "sampleId", "lastInferenceId"):
+                    value = replay_meta.get(key)
+                    if value is not None:
+                        matched_hazard[key] = value
+
+                if replay_meta.get("confidence") is not None:
+                    matched_hazard["replayConfidence"] = replay_meta["confidence"]
             
-            # Determine action based on recommendedAction
+            # Determine action based on (possibly updated) recommendedAction
             rec_action = matched_hazard.get("recommendedAction", "Exercise caution")
             
             # Add dynamic multilingual warnings
@@ -172,7 +206,6 @@ class LocalWorkflowRunner(WorkflowRunner):
             risk_level = "high" if obs_type == "stationary_vehicle" else "medium"
 
             # Use replay provenance metadata when available
-            replay_meta = obs.get("_replay_meta")
             if replay_meta:
                 rec_action = replay_meta.get("recommendedAction", rec_action)
                 risk_level = replay_meta.get("risk", risk_level)
@@ -283,8 +316,9 @@ class LocalWorkflowRunner(WorkflowRunner):
                     # Create WarningEvent
                     warning_text = result_hazard["warnings"]["en"]
                     warning_id = f"wrn-{obs_id}-{v_id}"
-                    warning_events.append(warning_id)
-                    
+
+                    warning_event_recorded = False
+
                     # 8b. Record warning in the perception graph (secondary, non-fatal)
                     try:
                         from server import _perception_graph
@@ -297,17 +331,26 @@ class LocalWorkflowRunner(WorkflowRunner):
                             road_segment_id=best_road_id,
                             timestamp=current_time,
                         )
+                        warning_event_recorded = True
                     except Exception as e:
                         logger.warning(f"PerceptionGraphService record_warning failed: {e}")
-                    
+
                     # Store WarningEvent node & relationships
-                    await Neo4jService.record_warning_event(
-                        warning_id,
-                        v_id,
-                        hazard_id,
-                        warning_text,
-                        "en"
-                    )
+                    try:
+                        await Neo4jService.record_warning_event(
+                            warning_id,
+                            v_id,
+                            hazard_id,
+                            warning_text,
+                            "en"
+                        )
+                        warning_event_recorded = True
+                    except Exception as e:
+                        logger.warning(f"Neo4jService record_warning_event failed: {e}")
+
+                    # Only append after at least one recording succeeded
+                    if warning_event_recorded:
+                        warning_events.append(warning_id)
         except Exception as e:
             logger.warning(f"Error generating warning events in Neo4j during workflow: {e}")
 
