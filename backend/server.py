@@ -53,6 +53,14 @@ _media_storage = LocalMediaStorage(db, MONGO_REACHABLE)
 _media_service = MediaService(_media_storage)
 
 
+from services.demo_replay_service import DemoReplayService
+_demo_replay = DemoReplayService()
+
+
+from services.vision_inference_service import VisionInferenceService
+_vision_inference = VisionInferenceService()
+
+
 # ======================= Models =======================
 class GeoPoint(BaseModel):
     latitude: float
@@ -453,10 +461,12 @@ async def ensure_seed() -> None:
 async def lifespan(app: FastAPI):
     await _perception_graph.initialize()
     await _training_samples.initialize()
+    await _demo_replay.initialize()
     try:
         yield
     finally:
         await _perception_graph.close()
+        await _demo_replay.close()
         client.close()
 
 
@@ -466,13 +476,17 @@ api_router = APIRouter(prefix="/api")
 # Attach service references for route dependency injection
 app.state.training_sample_service = _training_samples
 app.state.media_service = _media_service
+app.state.demo_replay_service = _demo_replay
+app.state.vision_inference_service = _vision_inference
 
 
 from routes.training_samples import router as training_samples_router
 from routes.media import router as media_router
+from routes.demo_replay import router as demo_replay_router
 
 api_router.include_router(training_samples_router)
 api_router.include_router(media_router)
+api_router.include_router(demo_replay_router)
 
 
 @api_router.get("/")

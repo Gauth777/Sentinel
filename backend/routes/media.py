@@ -127,25 +127,12 @@ async def get_media_metadata(request: Request, media_id: str):
 @router.get("/{media_id}/file")
 async def get_media_file(request: Request, media_id: str):
     svc = _get_media_service(request)
-    info = await svc.get_file_info(media_id)
+    info = await svc.get_file_response_info(media_id)
     if info is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media not found")
 
-    # Verify the file exists on disk
-    file_path = info["file_path"]
-    if not Path(file_path).exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Media file not found")
-
-    # Security: ensure the resolved file remains inside configured storage
-    storage_dir = Path(svc.get_storage_dir()).resolve()
-    resolved_path = Path(file_path).resolve()
-    try:
-        resolved_path.relative_to(storage_dir)
-    except ValueError:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Invalid file path")
-
     return FileResponse(
-        path=file_path,
+        path=info["path"],
         media_type=info["mime_type"],
         filename=f"{media_id}.{info['extension']}",
     )
