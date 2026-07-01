@@ -496,6 +496,19 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
+                    // @ts-expect-error demo-replay route exists in app directory
+                    router.push("/demo-replay");
+                  }}
+                  style={({ pressed }) => [styles.replayBtn, pressed && { opacity: 0.85 }]}
+                  testID="demo-replay-link"
+                  android_ripple={{ color: "#003844" }}
+                >
+                  <MaterialCommunityIcons name="play-circle-outline" size={14} color={colors.brand} />
+                  <Text style={styles.replayBtnText}>INDIAN ROAD REPLAY</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    Haptics.selectionAsync().catch(() => {});
                     // @ts-expect-error training-data route exists in app directory
                     router.push("/training-data");
                   }}
@@ -1115,6 +1128,24 @@ const styles = StyleSheet.create({
     borderColor: colors.brand + "59",
   },
   datasetLabBtnText: {
+    color: colors.brand,
+    fontSize: 12,
+    fontWeight: "600",
+    letterSpacing: 1,
+  },
+  replayBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(0,240,255,0.06)",
+    borderWidth: 1,
+    borderColor: colors.brand + "59",
+  },
+  replayBtnText: {
     color: colors.brand,
     fontSize: 12,
     fontWeight: "600",
