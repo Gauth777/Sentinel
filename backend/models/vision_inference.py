@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -102,14 +102,17 @@ class RuntimeHazardPrediction(BaseModel):
 
 
 class InferenceResult(BaseModel):
-    """Complete inference result for one replay sample."""
+    """Complete inference result for one replay sample.
+
+    inference_id should be computed deterministically via _compute_inference_id().
+    """
 
     model_config = ConfigDict(
         populate_by_name=True,
         alias_generator=_to_camel,
     )
 
-    inference_id: str = Field(default_factory=lambda: f"inf-{uuid.uuid4().hex[:12]}")
+    inference_id: str
     sample_id: str
     model: str
     prompt_version: str
@@ -122,6 +125,10 @@ class InferenceResult(BaseModel):
 
 
 # --------------- Cached prediction file schema ---------------
+
+class CachedPredictionValidationError(ValueError):
+    """Raised when a cached prediction file fails strict validation."""
+    pass
 
 
 class CachedPredictionFile(BaseModel):
@@ -142,11 +149,10 @@ class CachedPredictionFile(BaseModel):
         default=None, alias="runtimeHazard"
     )
     raw_response: Optional[str] = Field(default=None, alias="rawResponse")
-    validated: bool = True
+    validated: Literal[True]
 
 
 # --------------- Activation result ---------------
-
 
 class ActivationResult(BaseModel):
     """Result of mapping an inference to Sentinel hazard workflow."""
@@ -160,4 +166,21 @@ class ActivationResult(BaseModel):
     reason: Optional[str] = None
     observation_id: Optional[str] = None
     hazard_id: Optional[str] = None
-    warning_created: bool = False
+    warning_text_generated: bool = False
+    warning_event_created: bool = False
+
+
+class ActivationPublicResponse(BaseModel):
+    """Subset of activation result safe for public API output."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=_to_camel,
+    )
+
+    activated: bool
+    reason: Optional[str] = None
+    observation_id: Optional[str] = None
+    hazard_id: Optional[str] = None
+    warning_text_generated: bool = False
+    warning_event_created: bool = False

@@ -459,6 +459,10 @@ async def ensure_seed() -> None:
 # ======================= App =======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from services.replay_activation_service import ReplayActivationStore, set_store
+    store = ReplayActivationStore(db, MONGO_REACHABLE)
+    set_store(store)
+
     await _perception_graph.initialize()
     await _training_samples.initialize()
     await _demo_replay.initialize()

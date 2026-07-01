@@ -9,18 +9,24 @@ Rules:
   - hazard_presence=no → no hazard created, activated=false
   - hazard_presence=yes → create observation via LocalWorkflowRunner
   - Location required for activation (sample must have GPS coordinates)
-  - Idempotent: same (sample_id, inference_id) → same activation result
+  - Idempotent: same inference_id → same activation result
   - Source vehicle: v-replay-observer / Sentinel Dataset Observer
+
+Storage:
+  - Primary: db.replay_activations (MongoDB when reachable)
+  - Fallback: in-memory dict guarded by asyncio.Lock
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from models.vision_inference import (
     ActivationResult,
     InferenceResult,
-    RecommendedAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +35,7 @@ REPLAY_VEHICLE_ID = "v-replay-observer"
 REPLAY_VEHICLE_LABEL = "Sentinel Dataset Observer"
 
 # Map recommended_action to human-readable action text for the hazard
-_ACTION_MAP = {
+ACTION_MAP = {
     "slow_down": "Slow down",
     "maintain_speed": "Maintain speed",
     "increase_attention": "Increase attention",
@@ -38,12 +44,42 @@ _ACTION_MAP = {
     "change_lane": "Change lane",
 }
 
-# Cache of completed activations keyed by (sample_id, inference_id)
-_activation_cache: Dict[str, ActivationResult] = {}
 
+class ReplayActivationStore:
+    """Durable activation store with MongoDB primary and in-memory fallback.
 
-def _cache_key(sample_id: str, inference_id: str) -> str:
-    return f"{sample_id}:{inference_id}"
+    Uses atomic upsert on MongoDB when reachable, guarded asyncio.Lock
+    on in-memory fallback.
+    """
+
+    def __init__(self, db: Any = None, mongo_reachable: bool = False) -> None:
+        self._db = db
+        self._mongo = mongo_reachable
+        self._mem: Dict[str, Dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, inference_id: str) -> Optional[Dict[str, Any]]:
+        if self._mongo and self._db is not None:
+            try:
+                return await self._db.replay_activations.find_one(
+                    {"inferenceId": inference_id}, {"_id": 0}
+                )
+            except Exception:
+                pass
+        async with self._lock:
+            return self._mem.get(inference_id)
+
+    async def put(self, inference_id: str, record: Dict[str, Any]) -> None:
+        if self._mongo and self._db is not None:
+            try:
+                await self._db.replay_activations.replace_one(
+                    {"inferenceId": inference_id}, record, upsert=True
+                )
+                return
+            except Exception:
+                pass
+        async with self._lock:
+            self._mem[inference_id] = record
 
 
 def _derive_hazard_type(result: InferenceResult) -> str:
@@ -62,6 +98,28 @@ def _derive_hazard_type(result: InferenceResult) -> str:
     return "general_hazard"
 
 
+def _action_text(action_value: str) -> str:
+    """Convert enum value to human-readable action text."""
+    return ACTION_MAP.get(action_value, "Exercise caution")
+
+
+# Module-level store; initialized by server.py lifespan
+_store: Optional[ReplayActivationStore] = None
+_store_lock = asyncio.Lock()
+
+
+def get_store() -> ReplayActivationStore:
+    global _store
+    if _store is None:
+        _store = ReplayActivationStore()
+    return _store
+
+
+def set_store(store: ReplayActivationStore) -> None:
+    global _store
+    _store = store
+
+
 async def activate_inference(
     result: InferenceResult,
     sample_location: Optional[Dict[str, float]],
@@ -75,12 +133,20 @@ async def activate_inference(
     Returns:
         ActivationResult with activated=True/False
     """
-    cache_k = _cache_key(result.sample_id, result.inference_id)
+    store = get_store()
 
-    # Idempotency check
-    if cache_k in _activation_cache:
-        logger.info("Returning cached activation for %s", cache_k)
-        return _activation_cache[cache_k]
+    # Idempotency check — look up by deterministic inference_id
+    existing = await store.get(result.inference_id)
+    if existing is not None:
+        logger.info("Returning stored activation for inference %s", result.inference_id)
+        return ActivationResult(
+            activated=existing.get("activated", False),
+            reason=existing.get("reason"),
+            observation_id=existing.get("observationId"),
+            hazard_id=existing.get("hazardId"),
+            warning_text_generated=existing.get("warningTextGenerated", False),
+            warning_event_created=existing.get("warningEventCreated", False),
+        )
 
     # No hazard detected → skip activation
     if result.prediction.hazard_presence.value == "no":
@@ -88,7 +154,7 @@ async def activate_inference(
             activated=False,
             reason="no_hazard_detected",
         )
-        _activation_cache[cache_k] = activation
+        await _persist(store, result, activation)
         return activation
 
     # Location required for activation
@@ -97,7 +163,7 @@ async def activate_inference(
             activated=False,
             reason="location_missing",
         )
-        _activation_cache[cache_k] = activation
+        await _persist(store, result, activation)
         return activation
 
     lat = sample_location.get("latitude")
@@ -107,7 +173,7 @@ async def activate_inference(
             activated=False,
             reason="location_missing",
         )
-        _activation_cache[cache_k] = activation
+        await _persist(store, result, activation)
         return activation
 
     # Determine hazard type
@@ -122,7 +188,10 @@ async def activate_inference(
     else:
         hazard_label = hazard_type.replace("_", " ").title()
 
-    # Build observation
+    # Recommended action for the hazard
+    rec_action = _action_text(result.prediction.recommended_action.value)
+
+    # Build observation with replay provenance metadata
     obs_id = f"obs-replay-{result.sample_id}-{result.inference_id}"
     observation = {
         "id": obs_id,
@@ -132,6 +201,20 @@ async def activate_inference(
         "polygon": None,
         "sourceVehicleId": REPLAY_VEHICLE_ID,
         "vehicleLabel": REPLAY_VEHICLE_LABEL,
+        # Replay provenance metadata (used by workflow for replay obs)
+        "_replay_meta": {
+            "recommendedAction": rec_action,
+            "risk": result.prediction.anticipated_risk.value,
+            "model": result.model,
+            "inferenceMode": result.inference_mode.value,
+            "sampleId": result.sample_id,
+            "lastInferenceId": result.inference_id,
+            "confidence": (
+                result.runtime_hazard.confidence
+                if result.runtime_hazard and result.runtime_hazard.confidence is not None
+                else None
+            ),
+        },
     }
 
     try:
@@ -141,20 +224,51 @@ async def activate_inference(
         hazard_result = await runner.process_observation(observation)
 
         hazard_id = hazard_result.get("id") if hazard_result else None
-        has_warnings = bool(hazard_result and hazard_result.get("warnings"))
+
+        # Determine warning semantics accurately
+        has_warning_text = bool(hazard_result and hazard_result.get("warnings"))
+        # Check for actual warning events dispatched
+        warning_events = hazard_result.get("_warning_events", []) if hazard_result else []
+        has_warning_event = len(warning_events) > 0
 
         activation = ActivationResult(
             activated=True,
             observation_id=obs_id,
             hazard_id=hazard_id,
-            warning_created=has_warnings,
+            warning_text_generated=has_warning_text,
+            warning_event_created=has_warning_event,
         )
     except Exception as e:
-        logger.error("Hazard workflow failed for %s: %s", obs_id, e)
+        logger.error("Hazard workflow failed for %s: %s", obs_id, type(e).__name__)
         activation = ActivationResult(
             activated=False,
-            reason=f"workflow_error: {e}",
+            reason="activation_failed",
         )
 
-    _activation_cache[cache_k] = activation
+    await _persist(store, result, activation)
     return activation
+
+
+async def _persist(
+    store: ReplayActivationStore,
+    result: InferenceResult,
+    activation: ActivationResult,
+) -> None:
+    """Persist an activation record to the durable store."""
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "inferenceId": result.inference_id,
+        "sampleId": result.sample_id,
+        "observationId": activation.observation_id,
+        "hazardId": activation.hazard_id,
+        "activated": activation.activated,
+        "reason": activation.reason,
+        "warningTextGenerated": activation.warning_text_generated,
+        "warningEventCreated": activation.warning_event_created,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    try:
+        await store.put(result.inference_id, record)
+    except Exception as e:
+        logger.warning("Failed to persist activation record: %s", type(e).__name__)

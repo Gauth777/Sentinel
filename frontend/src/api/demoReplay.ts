@@ -60,6 +60,9 @@ export const demoReplayApi = {
   reset: () =>
     j<DemoReplayResetResponse>("/api/sentinel/demo-replay/reset", { method: "POST" }),
 
+  reload: () =>
+    j<DemoReplayStatus>("/api/sentinel/demo-replay/reload", { method: "POST" }),
+
   infer: (sampleId: string, activate: boolean = true) =>
     j<DemoReplayInferenceResponse>(
       `/api/sentinel/demo-replay/samples/${encodeURIComponent(sampleId)}/infer`,

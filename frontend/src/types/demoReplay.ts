@@ -81,6 +81,7 @@ export type DemoReplayInferenceResponse = {
     reason?: string | null;
     observationId: string | null;
     hazardId: string | null;
-    warningCreated: boolean;
+    warningTextGenerated: boolean;
+    warningEventCreated: boolean;
   };
 };
