@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0",
+  "mode": "dataset_replay",
+  "loop": true,
+  "samples": [
+    {
+      "sampleId": "sample_001",
+      "sequenceIndex": 1,
+      "title": "Example urban arterial",
+      "description": "Replace with real description after copying images",
+      "dashcamPath": "sample_001/dashcam.jpg",
+      "topviewPath": "sample_001/topview.png",
+      "location": { "latitude": 12.9452, "longitude": 80.1506 },
+      "headingDegrees": 8,
+      "capturedAt": "2026-06-29T10:00:00Z",
+      "tags": ["urban", "indian_road"],
+      "enabled": false
+    },
+    {
+      "sampleId": "sample_002",
+      "sequenceIndex": 2,
+      "title": "Example residential",
+      "description": "Replace with real description after copying images",
+      "dashcamPath": "sample_002/dashcam.jpg",
+      "topviewPath": "sample_002/topview.png",
+      "location": { "latitude": 12.94, "longitude": 80.15 },
+      "headingDegrees": 45,
+      "capturedAt": "2026-06-29T10:05:00Z",
+      "tags": ["residential", "indian_road"],
+      "enabled": false
+    }
+  ]
+}
