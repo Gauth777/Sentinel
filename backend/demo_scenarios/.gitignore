@@ -1,0 +1,10 @@
+# Ignore real research images and cached predictions
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.json
+
+# Keep README and example manifest
+!README.md
+!manifest.example.json
