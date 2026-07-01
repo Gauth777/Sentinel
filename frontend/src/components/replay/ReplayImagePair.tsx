@@ -18,6 +18,17 @@ export default function ReplayImagePair({
   const [dashcamLoading, setDashcamLoading] = useState(true);
   const [topviewLoading, setTopviewLoading] = useState(true);
 
+  React.useEffect(() => {
+    setDashcamError(false);
+    setDashcamLoading(true);
+  }, [dashcamUrl]);
+
+  React.useEffect(() => {
+    setTopviewError(false);
+    setTopviewLoading(true);
+  }, [topviewUrl]);
+
+
   return (
     <View style={styles.container}>
       {/* Dashcam Card */}

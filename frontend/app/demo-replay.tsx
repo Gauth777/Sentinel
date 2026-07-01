@@ -47,50 +47,84 @@ export default function DemoReplayScreen() {
   const progressAnim = useRef(new Animated.Value(0)).current;
   const [isAdvancing, setIsAdvancing] = useState(false);
 
+  const isMounted = useRef(true);
+  const advanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const getErrorMessage = (err: unknown): string => {
+    if (err instanceof Error) return err.message;
+    if (err && typeof err === "object" && "message" in err) {
+      return String((err as Record<string, unknown>).message);
+    }
+    return String(err);
+  };
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      if (advanceTimeoutRef.current) {
+        clearTimeout(advanceTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Fetch status and current sample
   const loadData = async () => {
     setLoading(true);
     setErrorText(null);
     try {
       const statusRes = await demoReplayApi.getStatus();
+      if (!isMounted.current) return;
       setStatus(statusRes);
 
       if (statusRes.status === "ready") {
         const currentRes = await demoReplayApi.getCurrent();
+        if (!isMounted.current) return;
         if (currentRes) {
           setCurrentSample(currentRes.sample);
           setSampleCount(currentRes.sampleCount);
           setCurrentIndex(currentRes.currentIndex);
         }
       }
-    } catch (err: any) {
-      setErrorText(err.message || "Failed to connect to backend");
+    } catch (err: unknown) {
+      if (isMounted.current) {
+        setErrorText(getErrorMessage(err));
+      }
     } finally {
-      setLoading(false);
+      if (isMounted.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleRunInference = async () => {
-    if (!currentSample || inferenceLoading || isAdvancing) return;
+    if (!currentSample || inferenceLoading || isAdvancing || actionLoading) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     setInferenceLoading(true);
     setErrorText(null);
     try {
       const res = await demoReplayApi.infer(currentSample.sampleId, true);
-      setInferenceResult(res);
-    } catch (err: any) {
-      setErrorText(err.message || "Inference failed");
+      if (isMounted.current) {
+        setInferenceResult(res);
+      }
+    } catch (err: unknown) {
+      if (isMounted.current) {
+        setErrorText(getErrorMessage(err));
+      }
     } finally {
-      setInferenceLoading(false);
+      if (isMounted.current) {
+        setInferenceLoading(false);
+      }
     }
   };
 
   const handleAdvance = async () => {
-    if (isAdvancing || actionLoading) return;
+    if (isAdvancing || actionLoading || inferenceLoading) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setIsAdvancing(true);
     setInferenceResult(null); // Clear previous UI
@@ -104,9 +138,14 @@ export default function DemoReplayScreen() {
       useNativeDriver: false,
     }).start();
 
-    setTimeout(async () => {
+    if (advanceTimeoutRef.current) {
+      clearTimeout(advanceTimeoutRef.current);
+    }
+
+    advanceTimeoutRef.current = setTimeout(async () => {
       try {
         const res = await demoReplayApi.advance();
+        if (!isMounted.current) return;
         if (res) {
           setCurrentSample(res.sample);
           setCurrentIndex(res.currentIndex);
@@ -116,31 +155,40 @@ export default function DemoReplayScreen() {
             setLoopNotification("ROUTE LOOP COMPLETE — RETURNED TO SAMPLE 1");
           }
         }
-      } catch (err: any) {
-        setErrorText(err.message || "Failed to advance vehicle");
+      } catch (err: unknown) {
+        if (isMounted.current) {
+          setErrorText(getErrorMessage(err));
+        }
       } finally {
-        setIsAdvancing(false);
+        if (isMounted.current) {
+          setIsAdvancing(false);
+        }
       }
     }, 1200);
   };
 
   const handleReset = async () => {
-    if (actionLoading || isAdvancing) return;
+    if (actionLoading || isAdvancing || inferenceLoading) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setActionLoading(true);
     setInferenceResult(null);
     setLoopNotification(null);
     try {
       const res = await demoReplayApi.reset();
+      if (!isMounted.current) return;
       if (res) {
         setCurrentSample(res.sample);
         setCurrentIndex(res.currentIndex);
         setSampleCount(res.sampleCount);
       }
-    } catch (err: any) {
-      setErrorText(err.message || "Failed to reset replay");
+    } catch (err: unknown) {
+      if (isMounted.current) {
+        setErrorText(getErrorMessage(err));
+      }
     } finally {
-      setActionLoading(false);
+      if (isMounted.current) {
+        setActionLoading(false);
+      }
     }
   };
 
@@ -279,11 +327,11 @@ export default function DemoReplayScreen() {
         <View style={styles.controlsGrid}>
           <Pressable
             onPress={handleRunInference}
-            disabled={inferenceLoading || isAdvancing}
+            disabled={inferenceLoading || isAdvancing || actionLoading}
             style={({ pressed }) => [
               styles.primaryBtn,
-              (inferenceLoading || isAdvancing) && styles.disabledBtn,
-              pressed && !inferenceLoading && !isAdvancing && { opacity: 0.85 },
+              (inferenceLoading || isAdvancing || actionLoading) && styles.disabledBtn,
+              pressed && !inferenceLoading && !isAdvancing && !actionLoading && { opacity: 0.85 },
             ]}
             testID="demo-replay-run-inference"
           >
@@ -294,11 +342,11 @@ export default function DemoReplayScreen() {
           <View style={styles.secondaryControlsRow}>
             <Pressable
               onPress={handleAdvance}
-              disabled={isAdvancing}
+              disabled={isAdvancing || actionLoading || inferenceLoading}
               style={({ pressed }) => [
                 styles.secondaryBtn,
-                isAdvancing && styles.disabledBtn,
-                pressed && !isAdvancing && { opacity: 0.85 },
+                (isAdvancing || actionLoading || inferenceLoading) && styles.disabledBtn,
+                pressed && !isAdvancing && !actionLoading && !inferenceLoading && { opacity: 0.85 },
               ]}
               testID="demo-replay-advance"
             >
@@ -308,11 +356,11 @@ export default function DemoReplayScreen() {
 
             <Pressable
               onPress={handleReset}
-              disabled={isAdvancing}
+              disabled={isAdvancing || actionLoading || inferenceLoading}
               style={({ pressed }) => [
                 styles.secondaryBtn,
-                isAdvancing && styles.disabledBtn,
-                pressed && !isAdvancing && { opacity: 0.85 },
+                (isAdvancing || actionLoading || inferenceLoading) && styles.disabledBtn,
+                pressed && !isAdvancing && !actionLoading && !inferenceLoading && { opacity: 0.85 },
               ]}
               testID="demo-replay-reset"
             >

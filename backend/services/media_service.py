@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from models.media import MediaLocation, MediaTelemetry, TelemetrySource
@@ -167,6 +168,37 @@ class MediaService:
             raise MediaServiceError(f"Storage failed: {e}")
 
         return stored.to_api_dict()
+
+    async def get_file_response_info(self, media_id: str) -> Optional[dict]:
+        """Return validated file info for HTTP response, or None if invalid.
+
+        Validates:
+        - metadata exists;
+        - physical file exists on disk;
+        - resolved path remains inside the configured storage directory.
+
+        Returns dict with keys: path, mime_type, extension
+        """
+        stored = await self._storage.get(media_id)
+        if stored is None:
+            return None
+
+        file_path = stored.file_path
+        if not Path(file_path).exists():
+            return None
+
+        storage_dir = Path(self._storage.media_dir).resolve()
+        resolved_path = Path(file_path).resolve()
+        try:
+            resolved_path.relative_to(storage_dir)
+        except ValueError:
+            return None
+
+        return {
+            "path": file_path,
+            "mime_type": stored.mime_type,
+            "extension": stored.extension,
+        }
 
     async def get_metadata(self, media_id: str) -> Optional[dict]:
         stored = await self._storage.get(media_id)
