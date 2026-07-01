@@ -5,6 +5,7 @@ import type {
   DemoReplayCurrentResponse,
   DemoReplayAdvanceResponse,
   DemoReplayResetResponse,
+  DemoReplayInferenceResponse,
 } from "@/src/types/demoReplay";
 
 function backendBase() {
@@ -58,6 +59,16 @@ export const demoReplayApi = {
 
   reset: () =>
     j<DemoReplayResetResponse>("/api/sentinel/demo-replay/reset", { method: "POST" }),
+
+  infer: (sampleId: string, activate: boolean = true) =>
+    j<DemoReplayInferenceResponse>(
+      `/api/sentinel/demo-replay/samples/${encodeURIComponent(sampleId)}/infer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activate }),
+      }
+    ),
 
   getDashcamUrl: (sampleId: string) => {
     const base = backendBase();
