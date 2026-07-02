@@ -124,6 +124,12 @@ class FakeSession:
             raise RuntimeError("Fake constraint failure")
         return FakeResult(self._records)
 
+    async def execute_write(self, tx_func, **params):
+        return await tx_func(self, **params)
+
+    async def execute_read(self, tx_func, **params):
+        return await tx_func(self, **params)
+
 
 class FakeNeo4jDriver:
     def __init__(self):
