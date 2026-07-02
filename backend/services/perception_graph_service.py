@@ -808,40 +808,103 @@ class _Neo4jGraphBackend:
 # Public service (unified facade)
 # ---------------------------------------------------------------------------
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name, "")
+    if not val:
+        return default
+    return val.strip().lower() == "true"
+
+
 class PerceptionGraphService:
     def __init__(self) -> None:
         self._memory = _InMemoryGraphBackend()
         self._neo4j = _Neo4jGraphBackend()
+        self._strict = _parse_bool_env("SENTINEL_NEO4J_STRICT", False)
+        self._neo4j_enabled = _parse_bool_env("NEO4J_ENABLED", False)
         self._mode = "memory"
+        self._neo4j_connected = False
+        self._memory_connected = False
 
     async def initialize(self) -> None:
-        if self._mode == "neo4j":
-            return
-        try:
-            await self._neo4j.initialize()
-            self._mode = "neo4j"
-        except Exception:
-            self._mode = "memory"
+        self._strict = _parse_bool_env("SENTINEL_NEO4J_STRICT", False)
+        self._neo4j_enabled = _parse_bool_env("NEO4J_ENABLED", False)
+
+        if self._strict:
+            if not self._neo4j_enabled:
+                self._neo4j_connected = False
+                raise RuntimeError("Neo4j is disabled under strict mode configuration")
+            try:
+                await self._neo4j.initialize()
+                self._mode = "neo4j"
+                self._neo4j_connected = True
+            except Exception:
+                self._neo4j_connected = False
+                raise RuntimeError("Neo4j initialization failed in strict mode") from None
+        else:
+            if not self._neo4j_enabled:
+                await self._memory.initialize()
+                self._mode = "memory"
+                self._memory_connected = True
+            else:
+                try:
+                    await self._neo4j.initialize()
+                    self._mode = "neo4j"
+                    self._neo4j_connected = True
+                except Exception:
+                    await self._memory.initialize()
+                    self._mode = "memory"
+                    self._memory_connected = True
 
     async def close(self) -> None:
         try:
             await self._neo4j.close()
         except Exception:
             pass
+        try:
+            await self._memory.close()
+        except Exception:
+            pass
         self._mode = "memory"
+        self._neo4j_connected = False
+        self._memory_connected = False
+
+    def get_backend_status(self) -> dict:
+        connected = False
+        if self._mode == "neo4j":
+            connected = self._neo4j_connected
+        elif self._mode == "memory":
+            connected = self._memory_connected
+        return {
+            "mode": self._mode,
+            "strict": self._strict,
+            "neo4jEnabled": self._neo4j_enabled,
+            "connected": connected,
+        }
 
     async def _execute(self, neo4j_method, memory_method, *args, **kwargs):
-        if self._mode == "neo4j":
+        if self._strict:
+            if self._mode != "neo4j":
+                raise RuntimeError("Active mode is not neo4j under strict mode configuration")
             try:
                 return await neo4j_method(*args, **kwargs)
             except ValueError:
                 raise
-            except Exception as e:
-                logger.warning(
-                    f"Neo4j operation failed ({type(e).__name__}), falling back to memory"
-                )
-                self._mode = "memory"
-        return await memory_method(*args, **kwargs)
+            except Exception:
+                raise RuntimeError("Neo4j operation failed in strict mode") from None
+        else:
+            if self._mode == "neo4j":
+                try:
+                    return await neo4j_method(*args, **kwargs)
+                except ValueError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"Neo4j operation failed ({type(e).__name__}), falling back to memory"
+                    )
+                    self._mode = "memory"
+                    await self._memory.initialize()
+                    self._memory_connected = True
+            return await memory_method(*args, **kwargs)
 
     async def record_observation(
         self,
