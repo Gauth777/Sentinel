@@ -64,10 +64,11 @@ async def test_strict_true_neo4j_initialization_fails(monkeypatch):
         mem_init_called = True
     monkeypatch.setattr(svc._memory, "initialize", mock_mem_init)
     
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(RuntimeError, match="Neo4j initialization failed in strict mode") as exc_info:
         await svc.initialize()
         
     exc_str = str(exc_info.value)
+    assert exc_str == "Neo4j initialization failed in strict mode"
     # Check that error text contains no supplied URI, username or password
     assert "secret-uri" not in exc_str
     assert "secret-username" not in exc_str
@@ -340,7 +341,7 @@ async def test_failed_strict_reinitialization_after_memory(monkeypatch):
         raise RuntimeError("connection failed")
     monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_fail)
 
-    with pytest.raises(RuntimeError, match="initialization failed"):
+    with pytest.raises(RuntimeError, match="Neo4j initialization failed in strict mode"):
         await svc.initialize()
 
     status = svc.get_backend_status()
