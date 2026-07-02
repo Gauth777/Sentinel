@@ -16,19 +16,30 @@ _driver = None
 
 def get_neo4j_driver():
     global _driver
+    strict = os.environ.get("SENTINEL_NEO4J_STRICT", "false").lower() == "true"
     if not NEO4J_ENABLED:
+        if strict:
+            raise RuntimeError("NEO4J_ENABLED must be true when SENTINEL_NEO4J_STRICT is true")
         return None
     if _driver is not None:
         return _driver
     
+    if strict and (not NEO4J_URI or not NEO4J_USERNAME or not NEO4J_PASSWORD):
+        raise RuntimeError("Neo4j credentials incomplete in strict mode")
+        
     try:
         from neo4j import GraphDatabase
         if NEO4J_URI and NEO4J_USERNAME and NEO4J_PASSWORD:
-            _driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+            driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+            if strict:
+                driver.verify_connectivity()
+            _driver = driver
             logger.info("Neo4j driver initialized successfully.")
             return _driver
     except Exception as e:
         logger.warning(f"Failed to initialize Neo4j driver: {e}. Falling back to MongoDB mock graph.")
+        if strict:
+            raise RuntimeError(f"Neo4j driver failed to initialize in strict mode: {e}")
     return None
 
 
