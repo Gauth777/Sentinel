@@ -192,18 +192,26 @@ class _InMemoryGraphBackend:
             }
 
     def _update_hazard_stats(self, hazard_id: str) -> None:
-        if hazard_id not in self._nodes:
-            return
-        if self._nodes[hazard_id].get("type") != "Hazard":
+        hz_node = self._nodes.get(hazard_id)
+        if not hz_node or hz_node.get("type") != "Hazard" or hz_node.get("scenarioId") != SCENARIO_ID:
             return
 
         source_vehicles: Set[str] = set()
         for e in self._edges.values():
-            if e["type"] == "SUPPORTS" and e["target"] == hazard_id:
-                obs_id = e["source"]
-                for e2 in self._edges.values():
-                    if e2["type"] == "OBSERVED" and e2["target"] == obs_id:
-                        source_vehicles.add(e2["source"])
+            if e["type"] != "SUPPORTS" or e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
+                continue
+            obs_id = e["source"]
+            obs_node = self._nodes.get(obs_id)
+            if not obs_node or obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
+                continue
+            for e2 in self._edges.values():
+                if e2["type"] != "OBSERVED" or e2["target"] != obs_id or e2.get("scenarioId") != SCENARIO_ID:
+                    continue
+                v_id = e2["source"]
+                v_node = self._nodes.get(v_id)
+                if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                    continue
+                source_vehicles.add(v_id)
 
         source_count = len(source_vehicles)
         if source_count == 1:
@@ -470,16 +478,28 @@ class _InMemoryGraphBackend:
         segment_id = ""
         for e in self._edges.values():
             if e["type"] == "ON_ROAD" and e["source"] == hazard_id and e.get("scenarioId") == SCENARIO_ID:
-                segment_id = e["target"]
-                break
+                target_id = e["target"]
+                target_node = self._nodes.get(target_id)
+                if target_node and target_node.get("type") == "RoadSegment" and target_node.get("scenarioId") == SCENARIO_ID:
+                    segment_id = target_id
+                    break
 
         source_vehicles = set()
         for e in self._edges.values():
-            if e["type"] == "SUPPORTS" and e["target"] == hazard_id and e.get("scenarioId") == SCENARIO_ID:
-                obs_id = e["source"]
-                for e2 in self._edges.values():
-                    if e2["type"] == "OBSERVED" and e2["target"] == obs_id and e2.get("scenarioId") == SCENARIO_ID:
-                        source_vehicles.add(e2["source"])
+            if e["type"] != "SUPPORTS" or e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
+                continue
+            obs_id = e["source"]
+            obs_node = self._nodes.get(obs_id)
+            if not obs_node or obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
+                continue
+            for e2 in self._edges.values():
+                if e2["type"] != "OBSERVED" or e2["target"] != obs_id or e2.get("scenarioId") != SCENARIO_ID:
+                    continue
+                v_id = e2["source"]
+                v_node = self._nodes.get(v_id)
+                if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                    continue
+                source_vehicles.add(v_id)
 
         sorted_vehicles = sorted(list(source_vehicles))
         source_count = len(sorted_vehicles)
@@ -917,8 +937,8 @@ class _Neo4jGraphBackend:
 
         check_query = """
         MATCH (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[obs:OBSERVED {scenario_id: $scenario_id}]->(o)
-        OPTIONAL MATCH (o)-[sup:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[obs:OBSERVED {scenario_id: $scenario_id}]->(o)
+        OPTIONAL MATCH (o)-[sup:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {scenario_id: $scenario_id})
         RETURN obs IS NOT NULL as has_observed, v.id as existing_vehicle_id,
                sup IS NOT NULL as has_supports, h.id as existing_hazard_id
         """
@@ -979,8 +999,8 @@ class _Neo4jGraphBackend:
 
         update_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (obs:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
-        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
+        OPTIONAL MATCH (obs:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
         WITH h, count(DISTINCT v) as sourceCount
         SET h.sourceCount = sourceCount,
             h.confidence = CASE
@@ -1141,7 +1161,7 @@ class _Neo4jGraphBackend:
     async def _get_normalized_hazard_neo4j(self, hazard_id: str) -> Optional[dict]:
         cypher = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
         RETURN h, r.id as segment_id
         """
         records = await self._run_read(cypher, h_id=hazard_id, scenario_id=SCENARIO_ID)
@@ -1155,8 +1175,8 @@ class _Neo4jGraphBackend:
         props = dict(h_node)
 
         vehicles_cypher = """
-        MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
-              (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->
+              (o:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->
               (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
         RETURN DISTINCT v.id as vehicle_id
         """
@@ -1260,6 +1280,7 @@ class _Neo4jGraphBackend:
           AND h_lat >= -90.0 AND h_lat <= 90.0
           AND h_lon >= -180.0 AND h_lon <= 180.0
           AND h_updated >= 0.0
+          AND h_updated < 1.0e308
           AND h_updated >= $min_updated_at
         WITH h, h_updated,
              point({longitude: h_lon, latitude: h_lat}) as h_pt,
@@ -1312,9 +1333,9 @@ class _Neo4jGraphBackend:
     ) -> dict:
         obs_query = """
         MATCH (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(o)
-        OPTIONAL MATCH (o)-[:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard)
-        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->(o)
+        OPTIONAL MATCH (o)-[:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {scenario_id: $scenario_id})
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
         RETURN count(o) > 0 as exists, collect(DISTINCT v.id) as vehicle_ids, collect(DISTINCT h.id) as hazard_ids, collect(DISTINCT r.id) as road_ids
         """
         res = await tx.run(obs_query, obs_id=observation_id, scenario_id=SCENARIO_ID)
@@ -1370,8 +1391,8 @@ class _Neo4jGraphBackend:
                 raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
 
             v_query = """
-            MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
-                  (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+            MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->
+                  (o:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->
                   (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
             RETURN DISTINCT v.id as vehicle_id
             """
@@ -1574,8 +1595,8 @@ class _Neo4jGraphBackend:
 
         stats_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (obs:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
-        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
+        OPTIONAL MATCH (obs:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
         WITH h, count(DISTINCT v) as sourceCount
         SET h.sourceCount = sourceCount,
             h.confidence = CASE
@@ -1588,7 +1609,7 @@ class _Neo4jGraphBackend:
 
         norm_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
         RETURN h, r.id as segment_id
         """
         res = await tx.run(norm_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
@@ -1598,8 +1619,8 @@ class _Neo4jGraphBackend:
         props = dict(h_node)
 
         v_query = """
-        MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
-              (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->
+              (o:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->
               (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
         RETURN DISTINCT v.id as vehicle_id
         """
