@@ -85,3 +85,20 @@ export type DemoReplayInferenceResponse = {
     warningEventCreated: boolean;
   };
 };
+
+export type DemoReplayEvidenceResponse = {
+  sampleId: string;
+  sourceSampleId: string | null;
+  expectedLabels: StructuredRoadPrediction | null;
+  sourceMapAvailable: boolean;
+};
+
+export type DemoReplayGraphVerifyResponse = {
+  hazardId: string;
+  graphBackend: string;
+  hazardNodeFound: boolean;
+  observationNodeFound: boolean;
+  relationshipFound: boolean;
+  warningNodeFound: boolean;
+  summary: string;
+};
