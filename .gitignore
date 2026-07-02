@@ -100,3 +100,6 @@ credentials.json
 google-services.json
 GoogleService-Info.plist
 service-account*.json
+
+# Replay Pack reports and generated items
+demo_smoke_report.json
