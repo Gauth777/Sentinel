@@ -14,10 +14,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-import sys
-if "pytest" in sys.modules:
-    os.environ.pop("SENTINEL_NEO4J_STRICT", None)
-
 SCENARIO_ID = "sentinel-demo"
 
 _TYPE_PRIORITY = {
@@ -813,15 +809,10 @@ class _Neo4jGraphBackend:
 # ---------------------------------------------------------------------------
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
-    if name == "SENTINEL_NEO4J_STRICT":
-        current_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-        if current_test:
-            if "test_perception_graph_service" not in current_test and "test_perception_graph_strict" not in current_test:
-                return False
-    val = os.environ.get(name, "")
-    if not val:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
         return default
-    return val.strip().lower() == "true"
+    return value.strip().lower() == "true"
 
 
 class PerceptionGraphService:
