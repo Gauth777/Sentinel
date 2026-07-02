@@ -658,41 +658,61 @@ class _InMemoryGraphBackend:
             is_idempotent_retry = False
 
             if obs_exists:
-                obs_vehicle = None
-                for e in self._edges.values():
-                    if e["type"] == "OBSERVED" and e["target"] == observation_id:
-                        obs_vehicle = e["source"]
-                        break
+                obs_node = self._nodes[observation_id]
+                if obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Observation {observation_id} exists but has wrong type or scenario")
 
-                obs_hazard = None
-                for e in self._edges.values():
-                    if e["type"] == "SUPPORTS" and e["source"] == observation_id:
-                        obs_hazard = e["target"]
-                        break
+                observed_edges = [
+                    e for e in self._edges.values()
+                    if e["type"] == "OBSERVED" and e["target"] == observation_id and e.get("scenarioId") == SCENARIO_ID
+                ]
+                if len(observed_edges) != 1:
+                    raise ValueError(f"Observation {observation_id} must have exactly one scenario-scoped OBSERVED relationship")
 
-                if obs_vehicle == vehicle_id and obs_hazard == hazard_id:
-                    hz_node = self._nodes.get(hazard_id)
-                    if not hz_node or hz_node.get("type") != "Hazard":
-                        raise ValueError(f"Hazard {hazard_id} does not exist or has invalid type")
+                obs_vehicle = observed_edges[0]["source"]
+                if obs_vehicle != vehicle_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {obs_vehicle}")
 
-                    props = hz_node.get("properties", {})
-                    if props.get("type") != hazard_type:
-                        raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
+                veh_node = self._nodes.get(obs_vehicle)
+                if not veh_node or veh_node.get("type") != "Vehicle" or veh_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Vehicle {obs_vehicle} has wrong type or scenario")
 
-                    hz_road = None
-                    for e in self._edges.values():
-                        if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
-                            hz_road = e["target"]
-                            break
-                    if hz_road != road_segment_id:
-                        raise ValueError(f"Hazard {hazard_id} is connected to road segment {hz_road}; expected {road_segment_id}")
+                supports_edges = [
+                    e for e in self._edges.values()
+                    if e["type"] == "SUPPORTS" and e["source"] == observation_id and e.get("scenarioId") == SCENARIO_ID
+                ]
+                if len(supports_edges) != 1:
+                    raise ValueError(f"Observation {observation_id} must have exactly one scenario-scoped SUPPORTS relationship")
 
-                    is_idempotent_retry = True
-                else:
-                    if obs_vehicle != vehicle_id:
-                        raise ValueError(f"Observation {observation_id} is already linked to vehicle {obs_vehicle}")
-                    if obs_hazard != hazard_id:
-                        raise ValueError(f"Observation {observation_id} is already linked to hazard {obs_hazard}")
+                obs_hazard = supports_edges[0]["target"]
+                if obs_hazard != hazard_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to hazard {obs_hazard}")
+
+                hz_node = self._nodes.get(obs_hazard)
+                if not hz_node or hz_node.get("type") != "Hazard" or hz_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Hazard {obs_hazard} has wrong type or scenario")
+
+                on_road_edges = [
+                    e for e in self._edges.values()
+                    if e["type"] == "ON_ROAD" and e["source"] == hazard_id and e.get("scenarioId") == SCENARIO_ID
+                ]
+                if len(on_road_edges) != 1:
+                    raise ValueError(f"Hazard {hazard_id} must have exactly one scenario-scoped ON_ROAD relationship")
+
+                hz_road = on_road_edges[0]["target"]
+                if hz_road != road_segment_id:
+                    raise ValueError(f"Hazard {hazard_id} is connected to road segment {hz_road}; expected {road_segment_id}")
+
+                road_node = self._nodes.get(hz_road)
+                if not road_node or road_node.get("type") != "RoadSegment" or road_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"RoadSegment {hz_road} has wrong type or scenario")
+
+                # Verify hazard type
+                props = hz_node.get("properties", {})
+                if props.get("type") != hazard_type:
+                    raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
+
+                is_idempotent_retry = True
 
             if is_idempotent_retry:
                 return {
@@ -1227,22 +1247,27 @@ class _Neo4jGraphBackend:
         MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $road_segment_id, scenario_id: $scenario_id})
         WHERE h.type = $hazard_type
           AND h.status = 'active'
-          AND h.latitude IS NOT NULL
-          AND h.longitude IS NOT NULL
-          AND h.latitude = h.latitude
-          AND h.longitude = h.longitude
-          AND h.latitude >= -90.0 AND h.latitude <= 90.0
-          AND h.longitude >= -180.0 AND h.longitude <= 180.0
-          AND h.updated_at IS NOT NULL
-          AND h.updated_at = h.updated_at
-          AND h.updated_at >= $min_updated_at
         WITH h,
-             point({longitude: h.longitude, latitude: h.latitude}) as h_pt,
+             toFloatOrNull(h.latitude) AS h_lat,
+             toFloatOrNull(h.longitude) AS h_lon,
+             toFloatOrNull(h.updated_at) AS h_updated
+        WHERE h_lat IS NOT NULL
+          AND h_lon IS NOT NULL
+          AND h_updated IS NOT NULL
+          AND h_lat = h_lat
+          AND h_lon = h_lon
+          AND h_updated = h_updated
+          AND h_lat >= -90.0 AND h_lat <= 90.0
+          AND h_lon >= -180.0 AND h_lon <= 180.0
+          AND h_updated >= 0.0
+          AND h_updated >= $min_updated_at
+        WITH h, h_updated,
+             point({longitude: h_lon, latitude: h_lat}) as h_pt,
              point({longitude: $longitude, latitude: $latitude}) as ref_pt
-        WITH h, point.distance(h_pt, ref_pt) as dist
+        WITH h, h_updated, point.distance(h_pt, ref_pt) as dist
         WHERE dist <= $radius_m
         RETURN h.id as hazard_id, dist
-        ORDER BY dist ASC, h.updated_at DESC, h.id ASC
+        ORDER BY dist ASC, h_updated DESC, h.id ASC
         LIMIT 1
         """
         records = await self._run_read(
@@ -1289,7 +1314,8 @@ class _Neo4jGraphBackend:
         MATCH (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
         OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(o)
         OPTIONAL MATCH (o)-[:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard)
-        RETURN count(o) > 0 as exists, v.id as vehicle_id, h.id as hazard_id
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        RETURN count(o) > 0 as exists, collect(DISTINCT v.id) as vehicle_ids, collect(DISTINCT h.id) as hazard_ids, collect(DISTINCT r.id) as road_ids
         """
         res = await tx.run(obs_query, obs_id=observation_id, scenario_id=SCENARIO_ID)
         obs_record = await res.single()
@@ -1298,37 +1324,50 @@ class _Neo4jGraphBackend:
         if obs_record:
             obs_exists = obs_record["exists"]
             if obs_exists:
-                linked_v = obs_record["vehicle_id"]
-                linked_h = obs_record["hazard_id"]
-                if linked_v == vehicle_id and linked_h == hazard_id:
-                    is_idempotent = True
-                else:
-                    if linked_v and linked_v != vehicle_id:
-                        raise ValueError(f"Observation {observation_id} is already linked to vehicle {linked_v}")
-                    if linked_h and linked_h != hazard_id:
-                        raise ValueError(f"Observation {observation_id} is already linked to hazard {linked_h}")
+                raw_vids = obs_record["vehicle_ids"] or []
+                raw_hids = obs_record["hazard_ids"] or []
+                raw_rids = obs_record["road_ids"] or []
+
+                vehicle_ids = [vid for vid in raw_vids if vid is not None]
+                hazard_ids = [hid for hid in raw_hids if hid is not None]
+                road_ids = [rid for rid in raw_rids if rid is not None]
+
+                if not vehicle_ids:
+                    raise ValueError(f"Observation {observation_id} is missing an OBSERVED relationship")
+                if not hazard_ids:
+                    raise ValueError(f"Observation {observation_id} is missing a SUPPORTS relationship")
+                if len(vehicle_ids) > 1:
+                    raise ValueError(f"Observation {observation_id} is linked to multiple vehicles: {vehicle_ids}")
+                if len(hazard_ids) > 1:
+                    raise ValueError(f"Observation {observation_id} is linked to multiple hazards: {hazard_ids}")
+                if vehicle_ids != [vehicle_id]:
+                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {vehicle_ids[0]}")
+                if hazard_ids != [hazard_id]:
+                    raise ValueError(f"Observation {observation_id} is already linked to hazard {hazard_ids[0]}")
+                if not road_ids:
+                    raise ValueError(f"Hazard {hazard_id} is missing an ON_ROAD relationship")
+                if len(road_ids) > 1:
+                    raise ValueError(f"Hazard {hazard_id} is connected to multiple road segments: {road_ids}")
+                if road_ids != [road_segment_id]:
+                    raise ValueError(f"Hazard {hazard_id} is connected to road segment {road_ids[0]}; expected {road_segment_id}")
+
+                is_idempotent = True
 
         if is_idempotent:
             import json
             hz_query = """
             MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-            OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
-            RETURN count(h) > 0 as exists, h as hazard_node, r.id as road_id
+            RETURN h
             """
-            res = await tx.run(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
-            hz_record = await res.single()
-            if not hz_record or not hz_record["exists"]:
-                raise ValueError(f"Hazard {hazard_id} does not exist or has invalid type")
-
-            h_node = hz_record["hazard_node"]
-            road_id = hz_record["road_id"]
+            res_hz = await tx.run(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+            hz_rec = await res_hz.single()
+            if not hz_rec:
+                raise ValueError(f"Hazard {hazard_id} not found")
+            h_node = hz_rec["h"]
             props = dict(h_node)
+
             if props.get("type") != hazard_type:
                 raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
-            if road_id != road_segment_id:
-                raise ValueError(f"Hazard {hazard_id} is connected to road segment {road_id}; expected {road_segment_id}")
-
-            segment_id = road_id or ""
 
             v_query = """
             MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
@@ -1372,7 +1411,7 @@ class _Neo4jGraphBackend:
                     "longitude": float(props.get("longitude", 0.0)),
                     "latitude": float(props.get("latitude", 0.0)),
                 },
-                "segment_id": segment_id,
+                "segment_id": road_segment_id,
                 "status": props.get("status", "active"),
                 "created_at": float(props.get("created_at", 0.0)),
                 "updated_at": float(props.get("updated_at", 0.0)),
@@ -1716,53 +1755,56 @@ WHITELIST = {
     "replayConfidence",
 }
 
-def _validate_hazard_fields(fields: Optional[dict]) -> None:
+def _validate_hazard_fields(fields: Optional[dict]) -> Optional[dict]:
     if fields is None:
-        return
+        return None
     if not isinstance(fields, dict):
         raise ValueError("hazard_fields must be a dictionary")
 
+    normalized = {}
     for k, v in fields.items():
         if k not in WHITELIST:
             raise ValueError(f"Unknown key in hazard_fields: {k}")
         if k in ("sourceCount", "sources", "source_vehicles", "confidence"):
             raise ValueError(f"Prohibited key in hazard_fields: {k}")
+        if v is None:
+            continue
 
-    if "risk" in fields and fields["risk"] is not None:
-        if fields["risk"] not in ("low", "medium", "high"):
-            raise ValueError("risk must be low, medium, or high")
+        if k in ("direction", "recommendedAction", "model", "inferenceMode", "sampleId", "lastInferenceId", "risk", "visibilityState", "sourceType", "routeRelevance", "status"):
+            if not isinstance(v, str):
+                raise ValueError(f"{k} must be a string")
+            if k == "risk" and v not in ("low", "medium", "high"):
+                raise ValueError("risk must be low, medium, or high")
+            if k == "visibilityState" and v not in ("visible", "hidden", "uncertain"):
+                raise ValueError("visibilityState must be visible, hidden, or uncertain")
+            if k == "sourceType" and v not in ("local_sensor", "shared_vehicle", "demo"):
+                raise ValueError("sourceType must be local_sensor, shared_vehicle, or demo")
+            if k == "routeRelevance" and v not in ("none", "low", "medium", "high"):
+                raise ValueError("routeRelevance must be none, low, medium, or high")
+            if k == "status" and v not in ("active", "resolved"):
+                raise ValueError("status must be active or resolved")
+            normalized[k] = v
 
-    if "visibilityState" in fields and fields["visibilityState"] is not None:
-        if fields["visibilityState"] not in ("visible", "hidden", "uncertain"):
-            raise ValueError("visibilityState must be visible, hidden, or uncertain")
+        elif k in ("distanceMeters", "replayConfidence"):
+            val_f = _validate_finite_float(v, k)
+            normalized[k] = val_f
 
-    if "sourceType" in fields and fields["sourceType"] is not None:
-        if fields["sourceType"] not in ("local_sensor", "shared_vehicle", "demo"):
-            raise ValueError("sourceType must be local_sensor, shared_vehicle, or demo")
+        elif k == "polygon":
+            if not isinstance(v, list):
+                raise ValueError("polygon must be a list of dicts")
+            normalized_poly = []
+            for pt in v:
+                if not isinstance(pt, dict) or "latitude" not in pt or "longitude" not in pt:
+                    raise ValueError("polygon points must contain latitude and longitude")
+                lat_f = _validate_finite_float(pt["latitude"], "polygon point latitude", -90, 90)
+                lon_f = _validate_finite_float(pt["longitude"], "polygon point longitude", -180, 180)
+                normalized_poly.append({
+                    "latitude": lat_f,
+                    "longitude": lon_f
+                })
+            normalized[k] = normalized_poly
 
-    if "routeRelevance" in fields and fields["routeRelevance"] is not None:
-        if fields["routeRelevance"] not in ("none", "low", "medium", "high"):
-            raise ValueError("routeRelevance must be none, low, medium, or high")
-
-    if "status" in fields and fields["status"] is not None:
-        if fields["status"] not in ("active", "resolved"):
-            raise ValueError("status must be active or resolved")
-
-    if "distanceMeters" in fields and fields["distanceMeters"] is not None:
-        _validate_finite_float(fields["distanceMeters"], "distanceMeters")
-
-    if "replayConfidence" in fields and fields["replayConfidence"] is not None:
-        _validate_finite_float(fields["replayConfidence"], "replayConfidence")
-
-    if "polygon" in fields and fields["polygon"] is not None:
-        poly = fields["polygon"]
-        if not isinstance(poly, list):
-            raise ValueError("polygon must be a list of dicts")
-        for pt in poly:
-            if not isinstance(pt, dict) or "latitude" not in pt or "longitude" not in pt:
-                raise ValueError("polygon points must contain latitude and longitude")
-            _validate_finite_float(pt["latitude"], "polygon point latitude", -90, 90)
-            _validate_finite_float(pt["longitude"], "polygon point longitude", -180, 180)
+    return normalized
 class PerceptionGraphService:
     def __init__(self) -> None:
         self._memory = _InMemoryGraphBackend()
@@ -1787,8 +1829,11 @@ class PerceptionGraphService:
                 await self._neo4j.initialize()
                 self._mode = "neo4j"
                 self._neo4j_connected = True
-            except Exception as e:
-                raise RuntimeError(f"initialization failed: {e}")
+            except Exception:
+                self._neo4j_connected = False
+                raise RuntimeError(
+                    "Neo4j initialization failed in strict mode"
+                ) from None
         else:
             if self._neo4j_enabled:
                 try:
@@ -1970,7 +2015,7 @@ class PerceptionGraphService:
         lat = _validate_finite_float(latitude, "latitude", -90, 90)
         lon = _validate_finite_float(longitude, "longitude", -180, 180)
         ts = _validate_finite_float(timestamp, "timestamp", min_val=0.0)
-        _validate_hazard_fields(hazard_fields)
+        normalized_fields = _validate_hazard_fields(hazard_fields)
 
         return await self._execute(
             self._neo4j.upsert_observation_and_hazard,
@@ -1986,7 +2031,7 @@ class PerceptionGraphService:
             road_segment_id=road_segment_id,
             road_segment_name=road_segment_name,
             timestamp=ts,
-            hazard_fields=hazard_fields,
+            hazard_fields=normalized_fields,
         )
 
     async def build_graph(

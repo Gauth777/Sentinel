@@ -599,7 +599,7 @@ async def test_neo4j_find_similar_cypher(monkeypatch):
     # Extract query
     find_query, params = mock_driver.queries[0]
     assert "point.distance" in find_query
-    assert "ORDER BY dist ASC, h.updated_at DESC, h.id ASC" in find_query
+    assert "ORDER BY dist ASC, h_updated DESC, h.id ASC" in find_query
     assert params["latitude"] == 37.7749
     assert params["longitude"] == -122.4194
     assert params["radius_m"] == 500.0
@@ -617,7 +617,7 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
     svc._neo4j_connected = True
 
     # 1. First mock results for a non-existing obs and non-existing hazard
-    mock_driver.result_queue.append([{"exists": False, "vehicle_id": None, "hazard_id": None}]) # obs exists
+    mock_driver.result_queue.append([{"exists": False, "vehicle_ids": [], "hazard_ids": [], "road_ids": []}]) # obs exists
     mock_driver.result_queue.append([{"exists": False, "hazard_node": None, "road_id": None}]) # hazard exists
     mock_driver.result_queue.append([]) # merge V
     mock_driver.result_queue.append([]) # merge R
@@ -644,16 +644,9 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
     mock_driver.result_queue.clear()
     mock_driver.queries.clear()
 
-    mock_driver.result_queue.append([{"exists": True, "vehicle_id": "v-1", "hazard_id": "hz-1"}]) # obs exists
-    mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole"}, "road_id": "road-1"}]) # hazard exists
-    mock_driver.result_queue.append([]) # merge V
-    mock_driver.result_queue.append([]) # merge R
-    mock_driver.result_queue.append([]) # update H
-    mock_driver.result_queue.append([]) # merge Obs
-    mock_driver.result_queue.append([]) # merge edges
-    mock_driver.result_queue.append([]) # stats query
-    mock_driver.result_queue.append([{"h": {"id": "hz-1", "latitude": 37.7749, "longitude": -122.4194}, "segment_id": "road-1"}]) # norm
-    mock_driver.result_queue.append([{"vehicle_id": "v-1"}]) # vehicles
+    mock_driver.result_queue.append([{"exists": True, "vehicle_ids": ["v-1"], "hazard_ids": ["hz-1"], "road_ids": ["road-1"]}]) # obs exists
+    mock_driver.result_queue.append([{"h": {"id": "hz-1", "type": "pothole", "latitude": 37.7749, "longitude": -122.4194}}]) # hazard exists
+    mock_driver.result_queue.append([{"vehicle_id": "v-1"}]) # vehicles query
 
     res2 = await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
@@ -769,8 +762,8 @@ async def test_idempotent_retry_neo4j_queries(monkeypatch):
     svc._mode = "neo4j"
     svc._neo4j_connected = True
 
-    mock_driver.result_queue.append([{"exists": True, "vehicle_id": "v-1", "hazard_id": "hz-1"}])
-    mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole", "latitude": 37.0, "longitude": -122.0}, "road_id": "road-1"}])
+    mock_driver.result_queue.append([{"exists": True, "vehicle_ids": ["v-1"], "hazard_ids": ["hz-1"], "road_ids": ["road-1"]}])
+    mock_driver.result_queue.append([{"h": {"id": "hz-1", "type": "pothole", "latitude": 37.0, "longitude": -122.0}}])
     mock_driver.result_queue.append([{"vehicle_id": "v-1"}])
 
     res = await svc.upsert_observation_and_hazard(
@@ -943,3 +936,155 @@ async def test_malformed_stored_hazards_skipped():
     )
     assert res is not None
     assert res["hazard"]["id"] == "hz-valid"
+
+
+@pytest.mark.anyio
+async def test_neo4j_incomplete_obs_handling(monkeypatch):
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
+    monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    # 1. Missing OBSERVED relation (exists=True, empty vehicle_ids, valid hazard, valid road)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": [], "hazard_ids": ["hz-1"], "road_ids": ["road-1"]
+    }])
+    with pytest.raises(ValueError, match="missing an OBSERVED relationship"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    # 2. Missing SUPPORTS relation (exists=True, valid vehicle, empty hazard_ids, valid road)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": ["v-1"], "hazard_ids": [], "road_ids": ["road-1"]
+    }])
+    with pytest.raises(ValueError, match="missing a SUPPORTS relationship"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    # 3. Multiple linked vehicles (exists=True, multiple vehicle_ids)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": ["v-1", "v-2"], "hazard_ids": ["hz-1"], "road_ids": ["road-1"]
+    }])
+    with pytest.raises(ValueError, match="linked to multiple vehicles"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    # 4. Multiple linked hazards (exists=True, multiple hazard_ids)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": ["v-1"], "hazard_ids": ["hz-1", "hz-2"], "road_ids": ["road-1"]
+    }])
+    with pytest.raises(ValueError, match="linked to multiple hazards"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    # 5. Missing ON_ROAD relationship (exists=True, valid vehicle, valid hazard, empty road_ids)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": ["v-1"], "hazard_ids": ["hz-1"], "road_ids": []
+    }])
+    with pytest.raises(ValueError, match="missing an ON_ROAD relationship"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    # 6. Multiple ON_ROAD relationships (exists=True, valid vehicle, valid hazard, multiple road_ids)
+    mock_driver.result_queue.append([{
+        "exists": True, "vehicle_ids": ["v-1"], "hazard_ids": ["hz-1"], "road_ids": ["road-1", "road-2"]
+    }])
+    with pytest.raises(ValueError, match="connected to multiple road segments"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    for query, params in mock_driver.queries:
+        uq = query.upper()
+        assert "MERGE" not in uq
+        assert "CREATE" not in uq
+        assert "SET" not in uq
+        assert "DELETE" not in uq
+
+
+@pytest.mark.anyio
+async def test_memory_idempotency_parity_edge_cases():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    svc._memory._merge_node_sync("obs-1", "Observation", "Obs 1", {"type": "pothole"})
+    svc._memory._merge_node_sync("v-1", "Vehicle", "V1", {})
+    svc._memory._merge_node_sync("hz-1", "Hazard", "Pothole Hazard", {"type": "pothole"})
+    svc._memory._merge_node_sync("road-1", "RoadSegment", "Road 1", {})
+
+    svc._memory._merge_edge_sync("OBSERVED:v-1:obs-1", "OBSERVED", "v-1", "obs-1", {})
+    svc._memory._edges["OBSERVED:v-1:obs-1"]["scenarioId"] = "other-scenario"
+    svc._memory._merge_edge_sync("SUPPORTS:obs-1:hz-1", "SUPPORTS", "obs-1", "hz-1", {})
+    svc._memory._merge_edge_sync("ON_ROAD:hz-1:road-1", "ON_ROAD", "hz-1", "road-1", {})
+
+    with pytest.raises(ValueError, match="must have exactly one scenario-scoped OBSERVED relationship"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+    svc._memory._edges["OBSERVED:v-1:obs-1"]["scenarioId"] = SCENARIO_ID
+
+    del svc._memory._edges["SUPPORTS:obs-1:hz-1"]
+    svc._memory._merge_edge_sync("SUPPORTS:obs-1:v-1", "SUPPORTS", "obs-1", "v-1", {})
+    with pytest.raises(ValueError, match="Observation obs-1 is already linked to hazard v-1"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0
+        )
+
+
+@pytest.mark.anyio
+async def test_hazard_fields_safety_checks():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    with pytest.raises(ValueError, match="direction must be a string"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0,
+            hazard_fields={"direction": {"nested": "dict"}}
+        )
+
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-2", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-2", hazard_type="pothole", hazard_label="P2",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0,
+        hazard_fields={"distanceMeters": 150, "replayConfidence": 1}
+    )
+    assert isinstance(res["hazard"]["distanceMeters"], float)
+    assert res["hazard"]["distanceMeters"] == 150.0
+    assert isinstance(res["hazard"]["replayConfidence"], float)
+    assert res["hazard"]["replayConfidence"] == 1.0
