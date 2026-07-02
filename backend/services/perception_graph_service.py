@@ -11,6 +11,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+from utils.geo import haversine_meters
 
 logger = logging.getLogger(__name__)
 
@@ -462,6 +463,251 @@ class _InMemoryGraphBackend:
             for eid in to_delete_edges:
                 del self._edges[eid]
 
+    def _normalize_hazard_record_sync(self, hazard_id: str) -> dict:
+        node = self._nodes[hazard_id]
+        props = node.get("properties", {})
+
+        segment_id = ""
+        for e in self._edges.values():
+            if e["type"] == "ON_ROAD" and e["source"] == hazard_id and e.get("scenarioId") == SCENARIO_ID:
+                segment_id = e["target"]
+                break
+
+        source_vehicles = set()
+        for e in self._edges.values():
+            if e["type"] == "SUPPORTS" and e["target"] == hazard_id and e.get("scenarioId") == SCENARIO_ID:
+                obs_id = e["source"]
+                for e2 in self._edges.values():
+                    if e2["type"] == "OBSERVED" and e2["target"] == obs_id and e2.get("scenarioId") == SCENARIO_ID:
+                        source_vehicles.add(e2["source"])
+
+        sorted_vehicles = sorted(list(source_vehicles))
+        source_count = len(sorted_vehicles)
+
+        if source_count == 1:
+            confidence = 60
+        elif source_count == 2:
+            confidence = 80
+        else:
+            confidence = 100 if source_count >= 3 else 60
+
+        polygon = props.get("polygon", None)
+        if polygon is not None:
+            polygon = [dict(p) for p in polygon]
+
+        return {
+            "id": node["id"],
+            "type": props.get("type", ""),
+            "label": node["label"],
+            "location": {
+                "latitude": float(props.get("latitude", 0.0)),
+                "longitude": float(props.get("longitude", 0.0)),
+            },
+            "segment_id": segment_id,
+            "status": props.get("status", "active"),
+            "created_at": float(props.get("created_at", 0.0)),
+            "updated_at": float(props.get("updated_at", 0.0)),
+            "sources": source_count,
+            "source_vehicles": sorted_vehicles,
+            "confidence": confidence,
+            "confirmed": int(props.get("confirmed", 0)),
+            "reportedIncorrect": int(props.get("reportedIncorrect", 0)),
+            "distanceMeters": props.get("distanceMeters") if props.get("distanceMeters") is None else float(props.get("distanceMeters")),
+            "direction": props.get("direction"),
+            "recommendedAction": props.get("recommendedAction"),
+            "risk": props.get("risk"),
+            "visibilityState": props.get("visibilityState"),
+            "sourceType": props.get("sourceType"),
+            "routeRelevance": props.get("routeRelevance"),
+            "polygon": polygon,
+            "model": props.get("model"),
+            "inferenceMode": props.get("inferenceMode"),
+            "sampleId": props.get("sampleId"),
+            "lastInferenceId": props.get("lastInferenceId"),
+            "replayConfidence": props.get("replayConfidence") if props.get("replayConfidence") is None else float(props.get("replayConfidence")),
+        }
+
+    async def get_observation_hazard(self, observation_id: str) -> Optional[dict]:
+        async with self._lock:
+            obs = self._nodes.get(observation_id)
+            if not obs or obs.get("type") != "Observation" or obs.get("scenarioId") != SCENARIO_ID:
+                return None
+
+            hazard_id = None
+            for e in self._edges.values():
+                if e["type"] == "SUPPORTS" and e["source"] == observation_id and e.get("scenarioId") == SCENARIO_ID:
+                    hazard_id = e["target"]
+                    break
+
+            if not hazard_id:
+                return None
+
+            hazard_node = self._nodes.get(hazard_id)
+            if not hazard_node or hazard_node.get("type") != "Hazard" or hazard_node.get("scenarioId") != SCENARIO_ID:
+                return None
+
+            return self._normalize_hazard_record_sync(hazard_id)
+
+    async def find_similar_active_hazard(
+        self,
+        hazard_type: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        radius_m: float,
+        min_updated_at: float,
+    ) -> Optional[dict]:
+        async with self._lock:
+            candidates = []
+            for nid, node in self._nodes.items():
+                if node.get("type") != "Hazard" or node.get("scenarioId") != SCENARIO_ID:
+                    continue
+                props = node.get("properties", {})
+
+                if props.get("latitude") is None or props.get("longitude") is None:
+                    continue
+                if props.get("status") is None or props.get("updated_at") is None:
+                    continue
+
+                if props.get("type") != hazard_type or props.get("status") != "active":
+                    continue
+
+                if float(props.get("updated_at", 0.0)) < min_updated_at:
+                    continue
+
+                has_road_connection = False
+                for e in self._edges.values():
+                    if e["type"] == "ON_ROAD" and e["source"] == nid and e["target"] == road_segment_id and e.get("scenarioId") == SCENARIO_ID:
+                        has_road_connection = True
+                        break
+                if not has_road_connection:
+                    continue
+
+                dist = haversine_meters(latitude, longitude, float(props["latitude"]), float(props["longitude"]))
+                if dist <= radius_m:
+                    candidates.append((dist, float(props["updated_at"]), nid))
+
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda x: (x[0], -x[1], x[2]))
+            best_match = candidates[0]
+            best_nid = best_match[2]
+            best_dist = best_match[0]
+
+            return {
+                "hazard": self._normalize_hazard_record_sync(best_nid),
+                "matchDistanceMeters": best_dist,
+            }
+
+    async def upsert_observation_and_hazard(
+        self,
+        *,
+        observation_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        hazard_id: str,
+        hazard_type: str,
+        hazard_label: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        road_segment_name: str,
+        timestamp: float,
+        hazard_fields: Optional[dict] = None,
+    ) -> dict:
+        async with self._lock:
+            obs_exists = observation_id in self._nodes
+            if obs_exists:
+                obs_node = self._nodes[observation_id]
+                obs_vehicle = None
+                for e in self._edges.values():
+                    if e["type"] == "OBSERVED" and e["target"] == observation_id:
+                        obs_vehicle = e["source"]
+                        break
+                if obs_vehicle != vehicle_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {obs_vehicle}")
+
+                obs_hazard = None
+                for e in self._edges.values():
+                    if e["type"] == "SUPPORTS" and e["source"] == observation_id:
+                        obs_hazard = e["target"]
+                        break
+                if obs_hazard != hazard_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to hazard {obs_hazard}")
+
+            hazard_exists = hazard_id in self._nodes
+            if hazard_exists:
+                hz_node = self._nodes[hazard_id]
+                props = hz_node.get("properties", {})
+                if props.get("type") != hazard_type:
+                    raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; cannot upsert as {hazard_type}")
+
+                hz_road = None
+                for e in self._edges.values():
+                    if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
+                        hz_road = e["target"]
+                        break
+                if hz_road != road_segment_id:
+                    raise ValueError(f"Hazard {hazard_id} is already connected to road segment {hz_road}")
+
+                if hazard_fields and "risk" in hazard_fields and hazard_fields["risk"] is not None:
+                    existing_risk = props.get("risk")
+                    new_risk = hazard_fields["risk"]
+                    if existing_risk in RISK_LEVELS:
+                        if RISK_LEVELS[new_risk] < RISK_LEVELS[existing_risk]:
+                            raise ValueError(f"Cannot decrease risk level from {existing_risk} to {new_risk}")
+
+                if hazard_fields and "status" in hazard_fields and hazard_fields["status"] == "active":
+                    if props.get("status") == "resolved":
+                        raise ValueError("Cannot change hazard status from resolved back to active")
+
+            hazard_created = not hazard_exists
+            observation_created = not obs_exists
+
+            self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label or vehicle_id, {})
+            self._merge_node_sync(road_segment_id, "RoadSegment", road_segment_name or road_segment_id, {})
+
+            if hazard_created:
+                hz_props = {
+                    "type": hazard_type,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "status": "active",
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                    "confirmed": 0,
+                    "reportedIncorrect": 0,
+                }
+            else:
+                hz_props = dict(self._nodes[hazard_id].get("properties", {}))
+                hz_props["updated_at"] = timestamp
+
+            if hazard_fields:
+                for k, v in hazard_fields.items():
+                    if v is not None:
+                        hz_props[k] = v
+
+            self._merge_node_sync(hazard_id, "Hazard", hazard_label or hazard_id, hz_props)
+
+            self._merge_node_sync(observation_id, "Observation", f"Observation {observation_id}", {
+                "type": hazard_type,
+                "timestamp": timestamp
+            })
+
+            self._merge_edge_sync(f"OBSERVED:{vehicle_id}:{observation_id}", "OBSERVED", vehicle_id, observation_id, {})
+            self._merge_edge_sync(f"SUPPORTS:{observation_id}:{hazard_id}", "SUPPORTS", observation_id, hazard_id, {})
+            self._merge_edge_sync(f"ON_ROAD:{hazard_id}:{road_segment_id}", "ON_ROAD", hazard_id, road_segment_id, {})
+            self._merge_edge_sync(f"APPROACHING:{vehicle_id}:{road_segment_id}", "APPROACHING", vehicle_id, road_segment_id, {})
+
+            self._update_hazard_stats(hazard_id)
+
+            return {
+                "hazard": self._normalize_hazard_record_sync(hazard_id),
+                "hazardCreated": hazard_created,
+                "observationCreated": observation_created,
+            }
+
 
 # ---------------------------------------------------------------------------
 # Neo4j backend (async driver, lazy import, sanitized errors)
@@ -803,6 +1049,450 @@ class _Neo4jGraphBackend:
         query = "MATCH (n:SentinelPerception {scenario_id: $scenario_id}) DETACH DELETE n"
         await self._run(query, scenario_id=SCENARIO_ID)
 
+    async def _get_normalized_hazard_neo4j(self, hazard_id: str) -> Optional[dict]:
+        cypher = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        RETURN h, r.id as segment_id
+        """
+        records = await self._run_read(cypher, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        if not records:
+            return None
+
+        record = records[0]
+        h_node = record["h"]
+        segment_id = record["segment_id"] or ""
+
+        props = dict(h_node)
+
+        vehicles_cypher = """
+        MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
+              (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+              (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN DISTINCT v.id as vehicle_id
+        """
+        v_records = await self._run_read(vehicles_cypher, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        source_vehicles = sorted([r["vehicle_id"] for r in v_records])
+        source_count = len(source_vehicles)
+
+        if source_count == 1:
+            confidence = 60
+        elif source_count == 2:
+            confidence = 80
+        else:
+            confidence = 100 if source_count >= 3 else 60
+
+        polygon = props.get("polygon")
+        if isinstance(polygon, str):
+            import json
+            try:
+                polygon = json.loads(polygon)
+            except Exception:
+                polygon = None
+        elif polygon is None:
+            polygon = props.get("polygon_json")
+            if isinstance(polygon, str):
+                import json
+                try:
+                    polygon = json.loads(polygon)
+                except Exception:
+                    polygon = None
+
+        return {
+            "id": hazard_id,
+            "type": props.get("type", ""),
+            "label": props.get("label", hazard_id),
+            "location": {
+                "latitude": float(props.get("latitude", 0.0)),
+                "longitude": float(props.get("longitude", 0.0)),
+            },
+            "segment_id": segment_id,
+            "status": props.get("status", "active"),
+            "created_at": float(props.get("created_at", 0.0)),
+            "updated_at": float(props.get("updated_at", 0.0)),
+            "sources": source_count,
+            "source_vehicles": source_vehicles,
+            "confidence": confidence,
+            "confirmed": int(props.get("confirmed", 0)),
+            "reportedIncorrect": int(props.get("reportedIncorrect", 0)),
+            "distanceMeters": props.get("distanceMeters") if props.get("distanceMeters") is None else float(props.get("distanceMeters")),
+            "direction": props.get("direction"),
+            "recommendedAction": props.get("recommendedAction"),
+            "risk": props.get("risk"),
+            "visibilityState": props.get("visibilityState"),
+            "sourceType": props.get("sourceType"),
+            "routeRelevance": props.get("routeRelevance"),
+            "polygon": polygon,
+            "model": props.get("model"),
+            "inferenceMode": props.get("inferenceMode"),
+            "sampleId": props.get("sampleId"),
+            "lastInferenceId": props.get("lastInferenceId"),
+            "replayConfidence": props.get("replayConfidence") if props.get("replayConfidence") is None else float(props.get("replayConfidence")),
+        }
+
+    async def get_observation_hazard(self, observation_id: str) -> Optional[dict]:
+        cypher = """
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})
+              -[:OBSERVED {scenario_id: $scenario_id}]->
+              (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
+              -[:SUPPORTS {scenario_id: $scenario_id}]->
+              (h:SentinelPerception:Hazard {scenario_id: $scenario_id})
+        RETURN h.id as hazard_id
+        """
+        records = await self._run_read(cypher, obs_id=observation_id, scenario_id=SCENARIO_ID)
+        if not records:
+            return None
+        hazard_id = records[0]["hazard_id"]
+        return await self._get_normalized_hazard_neo4j(hazard_id)
+
+    async def find_similar_active_hazard(
+        self,
+        hazard_type: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        radius_m: float,
+        min_updated_at: float,
+    ) -> Optional[dict]:
+        cypher = """
+        MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $road_segment_id, scenario_id: $scenario_id})
+        WHERE h.type = $hazard_type
+          AND h.status = 'active'
+          AND h.latitude IS NOT NULL
+          AND h.longitude IS NOT NULL
+          AND h.updated_at >= $min_updated_at
+        WITH h,
+             point({longitude: h.longitude, latitude: h.latitude}) as h_pt,
+             point({longitude: $longitude, latitude: $latitude}) as ref_pt
+        WITH h, point.distance(h_pt, ref_pt) as dist
+        WHERE dist <= $radius_m
+        RETURN h.id as hazard_id, dist
+        ORDER BY dist ASC, h.updated_at DESC, h.id ASC
+        LIMIT 1
+        """
+        records = await self._run_read(
+            cypher,
+            scenario_id=SCENARIO_ID,
+            road_segment_id=road_segment_id,
+            hazard_type=hazard_type,
+            min_updated_at=min_updated_at,
+            latitude=latitude,
+            longitude=longitude,
+            radius_m=radius_m
+        )
+        if not records:
+            return None
+        record = records[0]
+        hazard_id = record["hazard_id"]
+        dist = float(record["dist"])
+
+        normalized = await self._get_normalized_hazard_neo4j(hazard_id)
+        if not normalized:
+            return None
+        return {
+            "hazard": normalized,
+            "matchDistanceMeters": dist,
+        }
+
+    async def _upsert_tx(
+        self,
+        tx,
+        observation_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        hazard_id: str,
+        hazard_type: str,
+        hazard_label: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        road_segment_name: str,
+        timestamp: float,
+        hazard_fields: Optional[dict],
+    ) -> dict:
+        obs_query = """
+        MATCH (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(o)
+        OPTIONAL MATCH (o)-[:SUPPORTS {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard)
+        RETURN count(o) > 0 as exists, v.id as vehicle_id, h.id as hazard_id
+        """
+        res = await tx.run(obs_query, obs_id=observation_id, scenario_id=SCENARIO_ID)
+        obs_record = await res.single()
+        obs_exists = False
+        if obs_record:
+            obs_exists = obs_record["exists"]
+            if obs_exists:
+                linked_v = obs_record["vehicle_id"]
+                linked_h = obs_record["hazard_id"]
+                if linked_v and linked_v != vehicle_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {linked_v}")
+                if linked_h and linked_h != hazard_id:
+                    raise ValueError(f"Observation {observation_id} is already linked to hazard {linked_h}")
+
+        hz_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        RETURN count(h) > 0 as exists, h as hazard_node, r.id as road_id
+        """
+        res = await tx.run(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        hz_record = await res.single()
+        hazard_exists = False
+        if hz_record:
+            hazard_exists = hz_record["exists"]
+            if hazard_exists:
+                h_node = hz_record["hazard_node"]
+                road_id = hz_record["road_id"]
+
+                props = dict(h_node)
+                if props.get("type") != hazard_type:
+                    raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; cannot upsert as {hazard_type}")
+                if road_id and road_id != road_segment_id:
+                    raise ValueError(f"Hazard {hazard_id} is already connected to road segment {road_id}")
+
+                if hazard_fields and "risk" in hazard_fields and hazard_fields["risk"] is not None:
+                    existing_risk = props.get("risk")
+                    new_risk = hazard_fields["risk"]
+                    if existing_risk in RISK_LEVELS:
+                        if RISK_LEVELS[new_risk] < RISK_LEVELS[existing_risk]:
+                            raise ValueError(f"Cannot decrease risk level from {existing_risk} to {new_risk}")
+
+                if hazard_fields and "status" in hazard_fields and hazard_fields["status"] == "active":
+                    if props.get("status") == "resolved":
+                        raise ValueError("Cannot change hazard status from resolved back to active")
+
+        hazard_created = not hazard_exists
+        observation_created = not obs_exists
+
+        await tx.run(
+            """
+            MERGE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            ON CREATE SET v.label = $v_label
+            ON MATCH SET v.label = $v_label
+            """,
+            v_id=vehicle_id,
+            v_label=vehicle_label or vehicle_id,
+            scenario_id=SCENARIO_ID
+        )
+
+        await tx.run(
+            """
+            MERGE (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+            ON CREATE SET r.name = $r_name
+            ON MATCH SET r.name = $r_name
+            """,
+            r_id=road_segment_id,
+            r_name=road_segment_name or road_segment_id,
+            scenario_id=SCENARIO_ID
+        )
+
+        import json
+        hz_props = {}
+        if hazard_fields:
+            for k, v in hazard_fields.items():
+                if v is not None:
+                    if k == "polygon":
+                        hz_props["polygon_json"] = json.dumps(v)
+                    else:
+                        hz_props[k] = v
+
+        if hazard_created:
+            hz_props.update({
+                "type": hazard_type,
+                "latitude": latitude,
+                "longitude": longitude,
+                "status": hz_props.get("status", "active"),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "confirmed": 0,
+                "reportedIncorrect": 0,
+            })
+            await tx.run(
+                """
+                CREATE (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+                SET h += $props, h.label = $h_label
+                """,
+                h_id=hazard_id,
+                props=hz_props,
+                h_label=hazard_label or hazard_id,
+                scenario_id=SCENARIO_ID
+            )
+        else:
+            hz_props["updated_at"] = timestamp
+            await tx.run(
+                """
+                MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+                SET h += $props, h.label = $h_label
+                """,
+                h_id=hazard_id,
+                props=hz_props,
+                h_label=hazard_label or hazard_id,
+                scenario_id=SCENARIO_ID
+            )
+
+        await tx.run(
+            """
+            MERGE (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
+            ON CREATE SET o.type = $obs_type, o.label = $obs_label, o.observedSecondsAgo = 0, o.timestamp = $timestamp
+            ON MATCH SET o.type = $obs_type, o.label = $obs_label, o.observedSecondsAgo = 0, o.timestamp = $timestamp
+            """,
+            obs_id=observation_id,
+            obs_type=hazard_type or "",
+            obs_label=f"Observation {observation_id}",
+            timestamp=timestamp,
+            scenario_id=SCENARIO_ID
+        )
+
+        await tx.run(
+            """
+            MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            MATCH (o:SentinelPerception:Observation {id: $obs_id, scenario_id: $scenario_id})
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+            MERGE (v)-[:OBSERVED {scenario_id: $scenario_id}]->(o)
+            MERGE (o)-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+            MERGE (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r)
+            MERGE (v)-[:APPROACHING {scenario_id: $scenario_id}]->(r)
+            """,
+            v_id=vehicle_id,
+            obs_id=observation_id,
+            h_id=hazard_id,
+            r_id=road_segment_id,
+            scenario_id=SCENARIO_ID
+        )
+
+        stats_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (obs:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
+        WITH h, count(DISTINCT v) as sourceCount
+        SET h.sourceCount = sourceCount,
+            h.confidence = CASE
+                WHEN sourceCount = 1 THEN 60
+                WHEN sourceCount = 2 THEN 80
+                ELSE 100
+            END
+        """
+        await tx.run(stats_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+
+        norm_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+        RETURN h, r.id as segment_id
+        """
+        res = await tx.run(norm_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        record = await res.single()
+        h_node = record["h"]
+        segment_id = record["segment_id"] or ""
+        props = dict(h_node)
+
+        v_query = """
+        MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
+              (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+              (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN DISTINCT v.id as vehicle_id
+        """
+        res_v = await tx.run(v_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        source_vehicles = []
+        async for r in res_v:
+            source_vehicles.append(r["vehicle_id"])
+        source_vehicles.sort()
+        source_count = len(source_vehicles)
+
+        if source_count == 1:
+            confidence = 60
+        elif source_count == 2:
+            confidence = 80
+        else:
+            confidence = 100 if source_count >= 3 else 60
+
+        polygon = props.get("polygon")
+        if isinstance(polygon, str):
+            try:
+                polygon = json.loads(polygon)
+            except Exception:
+                polygon = None
+        elif polygon is None:
+            polygon = props.get("polygon_json")
+            if isinstance(polygon, str):
+                try:
+                    polygon = json.loads(polygon)
+                except Exception:
+                    polygon = None
+
+        hazard_record = {
+            "id": hazard_id,
+            "type": props.get("type", ""),
+            "label": props.get("label", hazard_id),
+            "location": {
+                "latitude": float(props.get("latitude", 0.0)),
+                "longitude": float(props.get("longitude", 0.0)),
+            },
+            "segment_id": segment_id,
+            "status": props.get("status", "active"),
+            "created_at": float(props.get("created_at", 0.0)),
+            "updated_at": float(props.get("updated_at", 0.0)),
+            "sources": source_count,
+            "source_vehicles": source_vehicles,
+            "confidence": confidence,
+            "confirmed": int(props.get("confirmed", 0)),
+            "reportedIncorrect": int(props.get("reportedIncorrect", 0)),
+            "distanceMeters": props.get("distanceMeters") if props.get("distanceMeters") is None else float(props.get("distanceMeters")),
+            "direction": props.get("direction"),
+            "recommendedAction": props.get("recommendedAction"),
+            "risk": props.get("risk"),
+            "visibilityState": props.get("visibilityState"),
+            "sourceType": props.get("sourceType"),
+            "routeRelevance": props.get("routeRelevance"),
+            "polygon": polygon,
+            "model": props.get("model"),
+            "inferenceMode": props.get("inferenceMode"),
+            "sampleId": props.get("sampleId"),
+            "lastInferenceId": props.get("lastInferenceId"),
+            "replayConfidence": props.get("replayConfidence") if props.get("replayConfidence") is None else float(props.get("replayConfidence")),
+        }
+
+        return {
+            "hazard": hazard_record,
+            "hazardCreated": hazard_created,
+            "observationCreated": observation_created,
+        }
+
+    async def upsert_observation_and_hazard(
+        self,
+        *,
+        observation_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        hazard_id: str,
+        hazard_type: str,
+        hazard_label: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        road_segment_name: str,
+        timestamp: float,
+        hazard_fields: Optional[dict] = None,
+    ) -> dict:
+        if self._driver is None:
+            raise RuntimeError("Neo4j driver not initialized")
+
+        async with self._driver.session(database=self._database) as session:
+            return await session.execute_write(
+                self._upsert_tx,
+                observation_id=observation_id,
+                vehicle_id=vehicle_id,
+                vehicle_label=vehicle_label,
+                hazard_id=hazard_id,
+                hazard_type=hazard_type,
+                hazard_label=hazard_label,
+                latitude=latitude,
+                longitude=longitude,
+                road_segment_id=road_segment_id,
+                road_segment_name=road_segment_name,
+                timestamp=timestamp,
+                hazard_fields=hazard_fields,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Public service (unified facade)
@@ -815,6 +1505,90 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() == "true"
 
 
+RISK_LEVELS = {"low": 1, "medium": 2, "high": 3}
+
+def _validate_input_str(val: str, name: str) -> None:
+    if not isinstance(val, str) or not val.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+
+def _validate_finite_float(val: float, name: str, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
+    try:
+        f = float(val)
+    except (ValueError, TypeError):
+        raise ValueError(f"{name} must be a number")
+    import math
+    if not math.isfinite(f):
+        raise ValueError(f"{name} must be a finite number")
+    if min_val is not None and f < min_val:
+        raise ValueError(f"{name} must be >= {min_val}")
+    if max_val is not None and f > max_val:
+        raise ValueError(f"{name} must be <= {max_val}")
+    return f
+
+WHITELIST = {
+    "distanceMeters",
+    "direction",
+    "recommendedAction",
+    "risk",
+    "visibilityState",
+    "sourceType",
+    "routeRelevance",
+    "polygon",
+    "status",
+    "model",
+    "inferenceMode",
+    "sampleId",
+    "lastInferenceId",
+    "replayConfidence",
+}
+
+def _validate_hazard_fields(fields: Optional[dict]) -> None:
+    if fields is None:
+        return
+    if not isinstance(fields, dict):
+        raise ValueError("hazard_fields must be a dictionary")
+
+    for k, v in fields.items():
+        if k not in WHITELIST:
+            raise ValueError(f"Unknown key in hazard_fields: {k}")
+        if k in ("sourceCount", "sources", "source_vehicles", "confidence"):
+            raise ValueError(f"Prohibited key in hazard_fields: {k}")
+
+    if "risk" in fields and fields["risk"] is not None:
+        if fields["risk"] not in ("low", "medium", "high"):
+            raise ValueError("risk must be low, medium, or high")
+
+    if "visibilityState" in fields and fields["visibilityState"] is not None:
+        if fields["visibilityState"] not in ("visible", "hidden", "uncertain"):
+            raise ValueError("visibilityState must be visible, hidden, or uncertain")
+
+    if "sourceType" in fields and fields["sourceType"] is not None:
+        if fields["sourceType"] not in ("local_sensor", "shared_vehicle", "demo"):
+            raise ValueError("sourceType must be local_sensor, shared_vehicle, or demo")
+
+    if "routeRelevance" in fields and fields["routeRelevance"] is not None:
+        if fields["routeRelevance"] not in ("none", "low", "medium", "high"):
+            raise ValueError("routeRelevance must be none, low, medium, or high")
+
+    if "status" in fields and fields["status"] is not None:
+        if fields["status"] not in ("active", "resolved"):
+            raise ValueError("status must be active or resolved")
+
+    if "distanceMeters" in fields and fields["distanceMeters"] is not None:
+        _validate_finite_float(fields["distanceMeters"], "distanceMeters")
+
+    if "replayConfidence" in fields and fields["replayConfidence"] is not None:
+        _validate_finite_float(fields["replayConfidence"], "replayConfidence")
+
+    if "polygon" in fields and fields["polygon"] is not None:
+        poly = fields["polygon"]
+        if not isinstance(poly, list):
+            raise ValueError("polygon must be a list of dicts")
+        for pt in poly:
+            if not isinstance(pt, dict) or "latitude" not in pt or "longitude" not in pt:
+                raise ValueError("polygon points must contain latitude and longitude")
+            _validate_finite_float(pt["latitude"], "polygon point latitude", -90, 90)
+            _validate_finite_float(pt["longitude"], "polygon point longitude", -180, 180)
 class PerceptionGraphService:
     def __init__(self) -> None:
         self._memory = _InMemoryGraphBackend()
@@ -955,6 +1729,89 @@ class PerceptionGraphService:
             language=language,
             road_segment_id=road_segment_id,
             timestamp=timestamp,
+        )
+
+    async def get_observation_hazard(
+        self,
+        observation_id: str,
+    ) -> Optional[dict]:
+        _validate_input_str(observation_id, "observation_id")
+        return await self._execute(
+            self._neo4j.get_observation_hazard,
+            self._memory.get_observation_hazard,
+            observation_id=observation_id,
+        )
+
+    async def find_similar_active_hazard(
+        self,
+        hazard_type: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        radius_m: float,
+        min_updated_at: float,
+    ) -> Optional[dict]:
+        _validate_input_str(hazard_type, "hazard_type")
+        _validate_input_str(road_segment_id, "road_segment_id")
+        lat = _validate_finite_float(latitude, "latitude", -90, 90)
+        lon = _validate_finite_float(longitude, "longitude", -180, 180)
+        rad = _validate_finite_float(radius_m, "radius_m")
+        if rad <= 0:
+            raise ValueError("radius_m must be greater than zero")
+        min_upd = _validate_finite_float(min_updated_at, "min_updated_at", min_val=0.0)
+
+        return await self._execute(
+            self._neo4j.find_similar_active_hazard,
+            self._memory.find_similar_active_hazard,
+            hazard_type=hazard_type,
+            latitude=lat,
+            longitude=lon,
+            road_segment_id=road_segment_id,
+            radius_m=rad,
+            min_updated_at=min_upd,
+        )
+
+    async def upsert_observation_and_hazard(
+        self,
+        *,
+        observation_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        hazard_id: str,
+        hazard_type: str,
+        hazard_label: str,
+        latitude: float,
+        longitude: float,
+        road_segment_id: str,
+        road_segment_name: str,
+        timestamp: float,
+        hazard_fields: Optional[dict] = None,
+    ) -> dict:
+        _validate_input_str(observation_id, "observation_id")
+        _validate_input_str(vehicle_id, "vehicle_id")
+        _validate_input_str(hazard_id, "hazard_id")
+        _validate_input_str(hazard_type, "hazard_type")
+        _validate_input_str(road_segment_id, "road_segment_id")
+        lat = _validate_finite_float(latitude, "latitude", -90, 90)
+        lon = _validate_finite_float(longitude, "longitude", -180, 180)
+        ts = _validate_finite_float(timestamp, "timestamp", min_val=0.0)
+        _validate_hazard_fields(hazard_fields)
+
+        return await self._execute(
+            self._neo4j.upsert_observation_and_hazard,
+            self._memory.upsert_observation_and_hazard,
+            observation_id=observation_id,
+            vehicle_id=vehicle_id,
+            vehicle_label=vehicle_label,
+            hazard_id=hazard_id,
+            hazard_type=hazard_type,
+            hazard_label=hazard_label,
+            latitude=lat,
+            longitude=lon,
+            road_segment_id=road_segment_id,
+            road_segment_name=road_segment_name,
+            timestamp=ts,
+            hazard_fields=hazard_fields,
         )
 
     async def build_graph(
