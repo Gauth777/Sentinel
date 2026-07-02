@@ -31,13 +31,19 @@ def _get_perception_graph(request: Request) -> PerceptionGraphService:
 async def graph_verify(
     request: Request,
     hazard_id: str = Query(alias="hazardId", min_length=1),
+    observation_id: str = Query(alias="observationId", min_length=1),
 ):
     """Verify that a hazard and its provenance chain exist in the perception graph.
 
-    Returns verification status for the hazard node, observation node,
-    SUPPORTS relationship, and any warning nodes.
+    Checks exact hazard, observation and SUPPORTS relationship.
     """
+    from services.neo4j_service import NEO4J_ENABLED
+
     svc = _get_perception_graph(request)
+    mode_before = svc._mode
+
+    # Check if Neo4j is expected
+    is_neo4j_expected = NEO4J_ENABLED
 
     try:
         graph = await svc.build_graph(hazard_id=hazard_id, limit=1)
@@ -46,56 +52,104 @@ async def graph_verify(
     except Exception as e:
         logger.error("Graph verification failed: %s", type(e).__name__)
         return DemoReplayGraphVerifyResponse(
-            hazard_id=hazard_id,
             graph_backend="unknown",
+            hazard_id=hazard_id,
+            observation_id=observation_id,
+            exact_hazard_found=False,
+            exact_observation_found=False,
+            exact_supports_relationship_found=False,
+            node_count=0,
+            edge_count=0,
+            relationship_types=[],
+            warning_node_found=False,
+            warning_count=0,
+            verified=False,
+            error="Graph query failed",
+            # Legacy fields
+            hazard_node_found=False,
+            observation_node_found=False,
+            relationship_found=False,
+            summary="Graph query failed",
+        )
+
+    # If Neo4j was expected, but we ended up with memory mode, this is a failure/error.
+    if is_neo4j_expected and (graph.get("mode") != "neo4j" or mode_before != "neo4j"):
+        return DemoReplayGraphVerifyResponse(
+            graph_backend="unknown",
+            hazard_id=hazard_id,
+            observation_id=observation_id,
+            exact_hazard_found=False,
+            exact_observation_found=False,
+            exact_supports_relationship_found=False,
+            node_count=0,
+            edge_count=0,
+            relationship_types=[],
+            warning_node_found=False,
+            warning_count=0,
+            verified=False,
+            error="Graph query failed",
+            # Legacy fields
+            hazard_node_found=False,
+            observation_node_found=False,
+            relationship_found=False,
             summary="Graph query failed",
         )
 
     mode = graph.get("mode", "memory")
-    backend_label = "neo4j" if mode == "neo4j" else "in_memory"
+    backend_label = "neo4j" if mode == "neo4j" else "memory"
 
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
 
-    # Check for hazard node
-    hazard_found = any(
+    # Exact checks
+    exact_hazard_found = any(
         n.get("id") == hazard_id and n.get("type") == "Hazard"
         for n in nodes
     )
-
-    # Check for observation nodes
-    observation_found = any(
-        n.get("type") == "Observation"
+    exact_observation_found = any(
+        n.get("id") == observation_id and n.get("type") == "Observation"
         for n in nodes
     )
-
-    # Check for SUPPORTS relationship linking observation to hazard
-    relationship_found = any(
-        e.get("type") == "SUPPORTS" and e.get("target") == hazard_id
+    exact_supports_relationship_found = any(
+        e.get("type") == "SUPPORTS" and e.get("source") == observation_id and e.get("target") == hazard_id
         for e in edges
     )
 
-    # Check for warning nodes
-    warning_found = any(
-        n.get("type") == "Warning"
-        for n in nodes
-    )
+    verified = exact_hazard_found and exact_observation_found and exact_supports_relationship_found
+
+    warning_node_found = any(n.get("type") == "Warning" for n in nodes)
+    warning_count = sum(1 for n in nodes if n.get("type") == "Warning")
+
+    node_count = len(nodes)
+    edge_count = len(edges)
+    relationship_types = list(sorted(set(e.get("type") for e in edges if e.get("type"))))
 
     # Build summary text
     if backend_label == "neo4j":
-        summary = "Persisted in Neo4j AuraDB"
+        if verified:
+            summary = "Persisted in Neo4j"
+        else:
+            summary = "Verification failed — missing exact IDs"
     else:
         summary = "Stored in in-memory fallback"
 
-    if not hazard_found:
-        summary += " — hazard node not found"
-
     return DemoReplayGraphVerifyResponse(
-        hazard_id=hazard_id,
         graph_backend=backend_label,
-        hazard_node_found=hazard_found,
-        observation_node_found=observation_found,
-        relationship_found=relationship_found,
-        warning_node_found=warning_found,
+        hazard_id=hazard_id,
+        observation_id=observation_id,
+        exact_hazard_found=exact_hazard_found,
+        exact_observation_found=exact_observation_found,
+        exact_supports_relationship_found=exact_supports_relationship_found,
+        node_count=node_count,
+        edge_count=edge_count,
+        relationship_types=relationship_types,
+        warning_node_found=warning_node_found,
+        warning_count=warning_count,
+        verified=verified,
+        error=None,
+        # Legacy fields
+        hazard_node_found=exact_hazard_found,
+        observation_node_found=exact_observation_found,
+        relationship_found=exact_supports_relationship_found,
         summary=summary,
     )

@@ -106,6 +106,8 @@ class DemoReplayService:
 
             self._load_manifest_locked()
             self._initialized = True
+            self._source_map = None
+            self._source_map_loaded = False
 
             if self._manifest is not None:
                 self._current_index = 0
@@ -372,3 +374,39 @@ class DemoReplayService:
             "headingDegrees": sample.heading_degrees,
             "tags": sample.tags,
         }
+
+    async def select_sample(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Select an enabled sample by ID, update current_index, and return details."""
+        async with self._lock:
+            if self._manifest is None:
+                return None
+            enabled = self._manifest.enabled_samples()
+            for idx, s in enumerate(enabled):
+                if s.sample_id == sample_id:
+                    self._current_index = idx
+                    return {
+                        "sample": self._safe_sample(s),
+                        "currentIndex": idx,
+                        "sampleCount": len(enabled),
+                    }
+            return None
+
+    async def get_cached_prediction(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Load and parse cached prediction JSON for a sample."""
+        async with self._lock:
+            if self._manifest is None:
+                return None
+            for s in self._manifest.enabled_samples():
+                if s.sample_id == sample_id:
+                    if not s.cached_prediction_path:
+                        return None
+                    path = self._scenario_dir / s.cached_prediction_path
+                    if not path.exists():
+                        return None
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            return json.load(f)
+                    except Exception as e:
+                        logger.warning("Failed to load cached prediction: %s", e)
+                        return None
+            return None

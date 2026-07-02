@@ -43,16 +43,31 @@ async def get_evidence(request: Request, sample_id: str):
     # Load source map
     source_map = await svc.get_source_map()
     source_sample_id = None
-    source_map_available = source_map is not None
     if source_map:
         source_sample_id = source_map.get(sample_id)
 
     # Load expected labels
     expected_labels = await svc.get_expected_labels(sample_id)
 
-    return DemoReplayEvidenceResponse(
+    # Load cached prediction
+    cached_pred = await svc.get_cached_prediction(sample_id)
+    if cached_pred:
+        actual_prediction = cached_pred.get("prediction")
+        model_name = cached_pred.get("model", "Qwen2.5-VL-7B-Instruct")
+        inference_mode = "cached_qwen"
+    else:
+        actual_prediction = None
+        model_name = "Qwen2.5-VL-7B-Instruct"
+        inference_mode = "cached_qwen"
+
+    from utils.evidence_helper import compute_evidence_data
+    evidence_data = compute_evidence_data(
         sample_id=sample_id,
         source_sample_id=source_sample_id,
         expected_labels=expected_labels,
-        source_map_available=source_map_available,
+        actual_prediction=actual_prediction,
+        inference_mode=inference_mode,
+        model=model_name
     )
+
+    return DemoReplayEvidenceResponse(**evidence_data)

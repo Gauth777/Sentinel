@@ -49,6 +49,8 @@ export default function DemoReplayScreen() {
   // Evidence and Graph verify state
   const [evidenceResult, setEvidenceResult] = useState<DemoReplayEvidenceResponse | null>(null);
   const [graphVerifyResult, setGraphVerifyResult] = useState<DemoReplayGraphVerifyResponse | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [graphVerifyError, setGraphVerifyError] = useState<string | null>(null);
 
   // Animation values for Advance transition
   const progressAnim = useRef(new Animated.Value(0)).current;
@@ -147,30 +149,49 @@ export default function DemoReplayScreen() {
     setErrorText(null);
     setEvidenceResult(null);
     setGraphVerifyResult(null);
+    setEvidenceError(null);
+    setGraphVerifyError(null);
     try {
       const res = await demoReplayApi.infer(currentSample.sampleId, true);
       if (isMounted.current) {
         setInferenceResult(res);
 
         // Fetch research provenance evidence
-        try {
-          const ev = await demoReplayApi.getEvidence(currentSample.sampleId);
-          if (isMounted.current) {
-            setEvidenceResult(ev);
+        if (res.evidence) {
+          setEvidenceResult(res.evidence);
+        } else {
+          try {
+            const ev = await demoReplayApi.getEvidence(currentSample.sampleId);
+            if (isMounted.current) {
+              setEvidenceResult(ev);
+            }
+          } catch (evErr: unknown) {
+            console.warn("Failed to load sample evidence:", evErr);
+            if (isMounted.current) {
+              setEvidenceError(getErrorMessage(evErr));
+            }
           }
-        } catch (evErr) {
-          console.warn("Failed to load sample evidence:", evErr);
         }
 
-        // Fetch graph verification if activated with hazardId
-        if (res.activation?.activated && res.activation.hazardId) {
-          try {
-            const gv = await demoReplayApi.getGraphVerification(res.activation.hazardId);
-            if (isMounted.current) {
-              setGraphVerifyResult(gv);
+        // Fetch graph verification if activated with hazardId and observationId
+        if (res.activation?.activated) {
+          if (res.activation.hazardId && res.activation.observationId) {
+            try {
+              const gv = await demoReplayApi.getGraphVerification(
+                res.activation.hazardId,
+                res.activation.observationId
+              );
+              if (isMounted.current) {
+                setGraphVerifyResult(gv);
+              }
+            } catch (gvErr: unknown) {
+              console.warn("Failed to verify graph provenance:", gvErr);
+              if (isMounted.current) {
+                setGraphVerifyError(getErrorMessage(gvErr));
+              }
             }
-          } catch (gvErr) {
-            console.warn("Failed to verify graph provenance:", gvErr);
+          } else {
+            setGraphVerifyError("Missing exact hazard or observation IDs");
           }
         }
       }
@@ -265,28 +286,23 @@ export default function DemoReplayScreen() {
     setInferenceResult(null);
     setEvidenceResult(null);
     setGraphVerifyResult(null);
+    setEvidenceError(null);
+    setGraphVerifyError(null);
     setErrorText(null);
     setLoopNotification(null);
 
     try {
-      // 1. Reset replay to first sample
-      await demoReplayApi.reset();
+      // 1. Select sample_005 directly using the new endpoint
+      const res = await demoReplayApi.selectSample("sample_005");
+      if (isMounted.current && res) {
+        const targetSample = res.sample;
+        const currentIdx = res.currentIndex;
 
-      // 2. Advance until we reach sample_005 (which has index 4)
-      let currentIdx = 0;
-      let targetSample: DemoReplaySample | null = null;
-
-      for (let i = 0; i < 4; i++) {
-        const res = await demoReplayApi.advance();
-        currentIdx = res.currentIndex;
-        targetSample = res.sample;
-      }
-
-      if (isMounted.current && targetSample) {
         setCurrentSample(targetSample);
         setCurrentIndex(currentIdx);
+        setSampleCount(res.sampleCount);
 
-        // 3. Immediately run inference on it!
+        // 2. Immediately run inference on it!
         setInferenceLoading(true);
         setLoading(false);
 
@@ -295,24 +311,41 @@ export default function DemoReplayScreen() {
           setInferenceResult(inferRes);
 
           // Fetch evidence
-          try {
-            const ev = await demoReplayApi.getEvidence(targetSample.sampleId);
-            if (isMounted.current) {
-              setEvidenceResult(ev);
+          if (inferRes.evidence) {
+            setEvidenceResult(inferRes.evidence);
+          } else {
+            try {
+              const ev = await demoReplayApi.getEvidence(targetSample.sampleId);
+              if (isMounted.current) {
+                setEvidenceResult(ev);
+              }
+            } catch (evErr: unknown) {
+              console.warn("Failed to load sample evidence:", evErr);
+              if (isMounted.current) {
+                setEvidenceError(getErrorMessage(evErr));
+              }
             }
-          } catch (evErr) {
-            console.warn("Failed to load sample evidence:", evErr);
           }
 
           // Fetch graph verification
-          if (inferRes.activation?.activated && inferRes.activation.hazardId) {
-            try {
-              const gv = await demoReplayApi.getGraphVerification(inferRes.activation.hazardId);
-              if (isMounted.current) {
-                setGraphVerifyResult(gv);
+          if (inferRes.activation?.activated) {
+            if (inferRes.activation.hazardId && inferRes.activation.observationId) {
+              try {
+                const gv = await demoReplayApi.getGraphVerification(
+                  inferRes.activation.hazardId,
+                  inferRes.activation.observationId
+                );
+                if (isMounted.current) {
+                  setGraphVerifyResult(gv);
+                }
+              } catch (gvErr: unknown) {
+                console.warn("Failed to verify graph provenance:", gvErr);
+                if (isMounted.current) {
+                  setGraphVerifyError(getErrorMessage(gvErr));
+                }
               }
-            } catch (gvErr) {
-              console.warn("Failed to verify graph provenance:", gvErr);
+            } else {
+              setGraphVerifyError("Missing exact hazard or observation IDs");
             }
           }
         }
@@ -466,6 +499,8 @@ export default function DemoReplayScreen() {
             evidence={evidenceResult}
             graphVerify={graphVerifyResult}
             inference={inferenceResult}
+            evidenceError={evidenceError}
+            graphVerifyError={graphVerifyError}
           />
         )}
 

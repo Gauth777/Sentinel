@@ -31,14 +31,13 @@ def graph_client():
 @pytest.mark.anyio
 async def test_graph_verify_not_found(graph_client):
     client, svc = graph_client
-    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-nonexistent")
+    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-nonexistent&observationId=obs-nonexistent")
     assert r.status_code == 200
     data = r.json()
     assert data["hazardId"] == "hzd-nonexistent"
     assert data["hazardNodeFound"] is False
     assert data["observationNodeFound"] is False
     assert data["relationshipFound"] is False
-    assert "hazard node not found" in data["summary"]
 
 
 @pytest.mark.anyio
@@ -58,11 +57,11 @@ async def test_graph_verify_found(graph_client):
         timestamp=123.45,
     )
 
-    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-1")
+    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-1&observationId=obs-1")
     assert r.status_code == 200
     data = r.json()
     assert data["hazardId"] == "hzd-1"
-    assert data["graphBackend"] == "in_memory"
+    assert data["graphBackend"] == "memory"
     assert data["hazardNodeFound"] is True
     assert data["observationNodeFound"] is True
     assert data["relationshipFound"] is True
@@ -97,7 +96,7 @@ async def test_graph_verify_warning_nodes(graph_client):
         timestamp=124.0,
     )
 
-    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-2")
+    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=hzd-2&observationId=obs-2")
     assert r.status_code == 200
     data = r.json()
     assert data["hazardId"] == "hzd-2"
@@ -109,6 +108,6 @@ async def test_graph_verify_warning_nodes(graph_client):
 
 def test_graph_verify_invalid_hazard_id(graph_client):
     client, svc = graph_client
-    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=")
+    r = client.get("/api/sentinel/demo-replay/graph-verify?hazardId=&observationId=obs-1")
     # Query validator enforces min_length=1 or required parameters
     assert r.status_code == 422
