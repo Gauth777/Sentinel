@@ -392,7 +392,9 @@ class DemoReplayService:
             return None
 
     async def get_cached_prediction(self, sample_id: str) -> Optional[Dict[str, Any]]:
-        """Load and parse cached prediction JSON for a sample."""
+        """Load, validate and parse cached prediction JSON for a sample."""
+        from models.vision_inference import CachedPredictionFile
+
         async with self._lock:
             if self._manifest is None:
                 return None
@@ -401,12 +403,24 @@ class DemoReplayService:
                     if not s.cached_prediction_path:
                         return None
                     path = self._scenario_dir / s.cached_prediction_path
+
+                    # Validate path remains inside scenario directory
+                    try:
+                        path.resolve().relative_to(self._scenario_dir.resolve())
+                    except ValueError:
+                        logger.warning("Cached prediction path traversal blocked for sample %s", sample_id)
+                        return None
+
                     if not path.exists():
                         return None
                     try:
                         with open(path, "r", encoding="utf-8") as f:
-                            return json.load(f)
+                            data = json.load(f)
+                        # Validate loaded JSON using CachedPredictionFile
+                        cached = CachedPredictionFile(**data)
+                        # Return the validated model dump
+                        return cached.model_dump(by_alias=True)
                     except Exception as e:
-                        logger.warning("Failed to load cached prediction: %s", e)
+                        logger.warning("Failed to load or validate cached prediction: %s", e)
                         return None
             return None

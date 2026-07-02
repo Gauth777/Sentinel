@@ -46,35 +46,114 @@ def client(test_app):
         yield c
 
 
-def test_sample_005_evidence(client):
-    r = client.get("/api/sentinel/demo-replay/samples/sample_005/evidence")
-    assert r.status_code == 200
-    data = r.json()
-    
-    # 1. Assert sample_005 maps to sample_041
-    assert data["sourceSampleId"] == "sample_041"
-    
-    # 2. Assert evidence contains exact expected labels
-    expected = data["expectedLabels"]
-    assert expected["roadType"] == "junction"
-    assert expected["trafficDensity"] == "high"
-    assert expected["roadComplexity"] == "complex"
-    assert expected["hazardPresence"] == "yes"
-    assert expected["anticipatedRisk"] == "high"
-    assert expected["recommendedAction"] == "yield"
-    
-    # 3. Assert actual prediction contains exact cached Qwen values
-    actual = data["actualPrediction"]
-    assert actual["roadType"] == "junction"
-    assert actual["trafficDensity"] == "medium"
-    assert actual["roadComplexity"] == "moderate"
-    assert actual["hazardPresence"] == "yes"
-    assert actual["anticipatedRisk"] == "medium"
-    assert actual["recommendedAction"] == "slow_down"
-    
-    # 4. Assert correctFieldCount is 2 and totalFieldCount is 6
-    assert data["correctFieldCount"] == 2
-    assert data["totalFieldCount"] == 6
+def test_sample_005_evidence(tmp_path):
+    # Setup mock scenario dir inside tmp_path
+    manifest_data = {
+        "schemaVersion": "1.0",
+        "mode": "dataset_replay",
+        "loop": True,
+        "samples": [
+            {
+                "sampleId": "sample_005",
+                "sequenceIndex": 1,
+                "title": "Mathura Road Urban Arterial",
+                "description": "Low traffic density on urban arterial segment in New Delhi",
+                "dashcamPath": "sample_005/dashcam.jpg",
+                "topviewPath": "sample_005/topview.png",
+                "location": {
+                    "latitude": 28.594701,
+                    "longitude": 77.072801
+                },
+                "headingDegrees": 5.0,
+                "capturedAt": "2026-06-29T10:20:00Z",
+                "tags": ["urban_arterial", "low_traffic", "indian_road"],
+                "expectedLabels": {
+                    "roadType": "junction",
+                    "trafficDensity": "high",
+                    "roadComplexity": "complex",
+                    "hazardPresence": "yes",
+                    "anticipatedRisk": "high",
+                    "recommendedAction": "yield"
+                },
+                "cachedPredictionPath": "sample_005/cached_prediction.json",
+                "enabled": True
+            }
+        ]
+    }
+
+    source_map_data = {
+        "sample_005": "sample_041"
+    }
+
+    cached_pred_data = {
+        "sampleId": "sample_005",
+        "model": "Qwen2.5-VL-7B-Instruct",
+        "promptVersion": "v1",
+        "generatedAt": "2026-06-29T10:20:00Z",
+        "prediction": {
+            "roadType": "junction",
+            "trafficDensity": "medium",
+            "roadComplexity": "moderate",
+            "hazardPresence": "yes",
+            "anticipatedRisk": "medium",
+            "recommendedAction": "slow_down"
+        },
+        "validated": True
+    }
+
+    # Write files
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
+    (tmp_path / "source_map.example.json").write_text(json.dumps(source_map_data), encoding="utf-8")
+
+    sample_dir = tmp_path / "sample_005"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    (sample_dir / "cached_prediction.json").write_text(json.dumps(cached_pred_data), encoding="utf-8")
+
+    # Initialize service and app
+    replay_svc = DemoReplayService(scenario_dir=str(tmp_path))
+    graph_svc = PerceptionGraphService()
+    graph_svc._mode = "memory"
+
+    app = FastAPI()
+    app.state.demo_replay_service = replay_svc
+    app.state.perception_graph_service = graph_svc
+
+    app.include_router(demo_replay_router, prefix="/api")
+    app.include_router(demo_replay_evidence_router, prefix="/api")
+    app.include_router(demo_replay_graph_verify_router, prefix="/api")
+
+    import anyio
+    anyio.run(replay_svc.initialize)
+
+    with TestClient(app) as test_client:
+        r = test_client.get("/api/sentinel/demo-replay/samples/sample_005/evidence")
+        assert r.status_code == 200
+        data = r.json()
+
+        # 1. Assert sample_005 maps to sample_041
+        assert data["sourceSampleId"] == "sample_041"
+
+        # 2. Assert evidence contains exact expected labels
+        expected = data["expectedLabels"]
+        assert expected["roadType"] == "junction"
+        assert expected["trafficDensity"] == "high"
+        assert expected["roadComplexity"] == "complex"
+        assert expected["hazardPresence"] == "yes"
+        assert expected["anticipatedRisk"] == "high"
+        assert expected["recommendedAction"] == "yield"
+
+        # 3. Assert actual prediction contains exact cached Qwen values
+        actual = data["actualPrediction"]
+        assert actual["roadType"] == "junction"
+        assert actual["trafficDensity"] == "medium"
+        assert actual["roadComplexity"] == "moderate"
+        assert actual["hazardPresence"] == "yes"
+        assert actual["anticipatedRisk"] == "medium"
+        assert actual["recommendedAction"] == "slow_down"
+
+        # 4. Assert correctFieldCount is 2 and totalFieldCount is 6
+        assert data["correctFieldCount"] == 2
+        assert data["totalFieldCount"] == 6
 
 
 @pytest.mark.anyio
