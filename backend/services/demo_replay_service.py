@@ -418,6 +418,13 @@ class DemoReplayService:
                             data = json.load(f)
                         # Validate loaded JSON using CachedPredictionFile
                         cached = CachedPredictionFile(**data)
+                        # Require sample_id to match the requested sample
+                        if cached.sample_id != sample_id:
+                            logger.warning(
+                                "Cached prediction sample_id mismatch: expected %s, got %s",
+                                sample_id, cached.sample_id,
+                            )
+                            return None
                         # Return the validated model dump
                         return cached.model_dump(by_alias=True)
                     except Exception as e:
