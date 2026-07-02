@@ -8,3 +8,4 @@
 # Keep README and example manifest
 !README.md
 !manifest.example.json
+!source_map.example.json
