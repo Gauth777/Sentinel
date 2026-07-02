@@ -482,15 +482,20 @@ app.state.training_sample_service = _training_samples
 app.state.media_service = _media_service
 app.state.demo_replay_service = _demo_replay
 app.state.vision_inference_service = _vision_inference
+app.state.perception_graph_service = _perception_graph
 
 
 from routes.training_samples import router as training_samples_router
 from routes.media import router as media_router
 from routes.demo_replay import router as demo_replay_router
+from routes.demo_replay_evidence import router as demo_replay_evidence_router
+from routes.demo_replay_graph_verify import router as demo_replay_graph_verify_router
 
 api_router.include_router(training_samples_router)
 api_router.include_router(media_router)
 api_router.include_router(demo_replay_router)
+api_router.include_router(demo_replay_evidence_router)
+api_router.include_router(demo_replay_graph_verify_router)
 
 
 @api_router.get("/")

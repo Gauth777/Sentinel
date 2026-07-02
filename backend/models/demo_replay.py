@@ -254,3 +254,70 @@ class DemoReplayReloadResponse(BaseModel):
     current_index: int
     current_sample_id: Optional[str] = None
     loop: bool
+
+
+class DemoReplayFieldMatches(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    road_type: bool
+    traffic_density: bool
+    road_complexity: bool
+    hazard_presence: bool
+    anticipated_risk: bool
+    recommended_action: bool
+
+
+class DemoReplaySelectResponse(BaseModel):
+    """POST /api/sentinel/demo-replay/samples/{sample_id}/select"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    sample: DemoReplayPublicSample
+    current_index: int
+    sample_count: int
+
+
+class DemoReplayEvidenceResponse(BaseModel):
+    """GET /api/sentinel/demo-replay/samples/{sample_id}/evidence"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    local_sample_id: str
+    source_sample_id: Optional[str] = None
+    expected_labels: Optional[DemoExpectedLabels] = None
+    actual_prediction: Optional[DemoExpectedLabels] = None
+    field_matches: Optional[DemoReplayFieldMatches] = None
+    correct_field_count: int = 0
+    total_field_count: int = 6
+    inference_mode: str
+    model: str
+
+    # Backward compatibility
+    sample_id: Optional[str] = None
+    source_map_available: bool = False
+
+
+class DemoReplayGraphVerifyResponse(BaseModel):
+    """GET /api/sentinel/demo-replay/graph-verify"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    graph_backend: str  # "neo4j" | "memory" | "unknown"
+    hazard_id: str
+    observation_id: str
+    exact_hazard_found: bool
+    exact_observation_found: bool
+    exact_supports_relationship_found: bool
+    node_count: int
+    edge_count: int
+    relationship_types: list[str]
+    warning_node_found: bool
+    warning_count: int
+    verified: bool
+    error: Optional[str] = None
+
+    # Backward compatibility
+    hazard_node_found: Optional[bool] = None
+    observation_node_found: Optional[bool] = None
+    relationship_found: Optional[bool] = None
+    summary: Optional[str] = None
