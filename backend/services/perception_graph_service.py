@@ -533,6 +533,19 @@ class _InMemoryGraphBackend:
             if not obs or obs.get("type") != "Observation" or obs.get("scenarioId") != SCENARIO_ID:
                 return None
 
+            # Verify OBSERVED relationship from a Vehicle
+            vehicle_id = None
+            for e in self._edges.values():
+                if e["type"] == "OBSERVED" and e["target"] == observation_id and e.get("scenarioId") == SCENARIO_ID:
+                    vehicle_id = e["source"]
+                    break
+            if not vehicle_id:
+                return None
+
+            veh_node = self._nodes.get(vehicle_id)
+            if not veh_node or veh_node.get("type") != "Vehicle" or veh_node.get("scenarioId") != SCENARIO_ID:
+                return None
+
             hazard_id = None
             for e in self._edges.values():
                 if e["type"] == "SUPPORTS" and e["source"] == observation_id and e.get("scenarioId") == SCENARIO_ID:
@@ -557,6 +570,7 @@ class _InMemoryGraphBackend:
         radius_m: float,
         min_updated_at: float,
     ) -> Optional[dict]:
+        import math
         async with self._lock:
             candidates = []
             for nid, node in self._nodes.items():
@@ -564,15 +578,38 @@ class _InMemoryGraphBackend:
                     continue
                 props = node.get("properties", {})
 
-                if props.get("latitude") is None or props.get("longitude") is None:
-                    continue
-                if props.get("status") is None or props.get("updated_at") is None:
-                    continue
-
-                if props.get("type") != hazard_type or props.get("status") != "active":
+                status = props.get("status")
+                if status not in ("active", "resolved"):
                     continue
 
-                if float(props.get("updated_at", 0.0)) < min_updated_at:
+                if props.get("type") != hazard_type or status != "active":
+                    continue
+
+                try:
+                    lat_val = props.get("latitude")
+                    lon_val = props.get("longitude")
+                    if lat_val is None or lon_val is None or isinstance(lat_val, bool) or isinstance(lon_val, bool):
+                        continue
+                    lat_f = float(lat_val)
+                    lon_f = float(lon_val)
+                    if not math.isfinite(lat_f) or not math.isfinite(lon_f):
+                        continue
+                    if lat_f < -90.0 or lat_f > 90.0 or lon_f < -180.0 or lon_f > 180.0:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+                try:
+                    upd_val = props.get("updated_at")
+                    if upd_val is None or isinstance(upd_val, bool):
+                        continue
+                    upd_f = float(upd_val)
+                    if not math.isfinite(upd_f) or upd_f < 0.0:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+                if upd_f < min_updated_at:
                     continue
 
                 has_road_connection = False
@@ -583,9 +620,9 @@ class _InMemoryGraphBackend:
                 if not has_road_connection:
                     continue
 
-                dist = haversine_meters(latitude, longitude, float(props["latitude"]), float(props["longitude"]))
+                dist = haversine_meters(latitude, longitude, lat_f, lon_f)
                 if dist <= radius_m:
-                    candidates.append((dist, float(props["updated_at"]), nid))
+                    candidates.append((dist, upd_f, nid))
 
             if not candidates:
                 return None
@@ -594,7 +631,6 @@ class _InMemoryGraphBackend:
             best_match = candidates[0]
             best_nid = best_match[2]
             best_dist = best_match[0]
-
             return {
                 "hazard": self._normalize_hazard_record_sync(best_nid),
                 "matchDistanceMeters": best_dist,
@@ -616,25 +652,54 @@ class _InMemoryGraphBackend:
         timestamp: float,
         hazard_fields: Optional[dict] = None,
     ) -> dict:
+        import copy
         async with self._lock:
             obs_exists = observation_id in self._nodes
+            is_idempotent_retry = False
+
             if obs_exists:
-                obs_node = self._nodes[observation_id]
                 obs_vehicle = None
                 for e in self._edges.values():
                     if e["type"] == "OBSERVED" and e["target"] == observation_id:
                         obs_vehicle = e["source"]
                         break
-                if obs_vehicle != vehicle_id:
-                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {obs_vehicle}")
 
                 obs_hazard = None
                 for e in self._edges.values():
                     if e["type"] == "SUPPORTS" and e["source"] == observation_id:
                         obs_hazard = e["target"]
                         break
-                if obs_hazard != hazard_id:
-                    raise ValueError(f"Observation {observation_id} is already linked to hazard {obs_hazard}")
+
+                if obs_vehicle == vehicle_id and obs_hazard == hazard_id:
+                    hz_node = self._nodes.get(hazard_id)
+                    if not hz_node or hz_node.get("type") != "Hazard":
+                        raise ValueError(f"Hazard {hazard_id} does not exist or has invalid type")
+
+                    props = hz_node.get("properties", {})
+                    if props.get("type") != hazard_type:
+                        raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
+
+                    hz_road = None
+                    for e in self._edges.values():
+                        if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
+                            hz_road = e["target"]
+                            break
+                    if hz_road != road_segment_id:
+                        raise ValueError(f"Hazard {hazard_id} is connected to road segment {hz_road}; expected {road_segment_id}")
+
+                    is_idempotent_retry = True
+                else:
+                    if obs_vehicle != vehicle_id:
+                        raise ValueError(f"Observation {observation_id} is already linked to vehicle {obs_vehicle}")
+                    if obs_hazard != hazard_id:
+                        raise ValueError(f"Observation {observation_id} is already linked to hazard {obs_hazard}")
+
+            if is_idempotent_retry:
+                return {
+                    "hazard": self._normalize_hazard_record_sync(hazard_id),
+                    "hazardCreated": False,
+                    "observationCreated": False,
+                }
 
             hazard_exists = hazard_id in self._nodes
             if hazard_exists:
@@ -662,56 +727,60 @@ class _InMemoryGraphBackend:
                     if props.get("status") == "resolved":
                         raise ValueError("Cannot change hazard status from resolved back to active")
 
-            hazard_created = not hazard_exists
-            observation_created = not obs_exists
+            nodes_snapshot = copy.deepcopy(self._nodes)
+            edges_snapshot = copy.deepcopy(self._edges)
 
-            self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label or vehicle_id, {})
-            self._merge_node_sync(road_segment_id, "RoadSegment", road_segment_name or road_segment_id, {})
+            try:
+                hazard_created = not hazard_exists
+                observation_created = not obs_exists
 
-            if hazard_created:
-                hz_props = {
+                self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label, {})
+                self._merge_node_sync(road_segment_id, "RoadSegment", road_segment_name, {})
+
+                if hazard_created:
+                    hz_props = {
+                        "type": hazard_type,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "status": "active",
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                        "confirmed": 0,
+                        "reportedIncorrect": 0,
+                    }
+                else:
+                    hz_props = dict(self._nodes[hazard_id].get("properties", {}))
+                    hz_props["updated_at"] = timestamp
+
+                if hazard_fields:
+                    for k, v in hazard_fields.items():
+                        if v is not None:
+                            hz_props[k] = v
+
+                self._merge_node_sync(hazard_id, "Hazard", hazard_label, hz_props)
+
+                self._merge_node_sync(observation_id, "Observation", f"Observation {observation_id}", {
                     "type": hazard_type,
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "status": "active",
-                    "created_at": timestamp,
-                    "updated_at": timestamp,
-                    "confirmed": 0,
-                    "reportedIncorrect": 0,
+                    "timestamp": timestamp
+                })
+
+                self._merge_edge_sync(f"OBSERVED:{vehicle_id}:{observation_id}", "OBSERVED", vehicle_id, observation_id, {})
+                self._merge_edge_sync(f"SUPPORTS:{observation_id}:{hazard_id}", "SUPPORTS", observation_id, hazard_id, {})
+                self._merge_edge_sync(f"ON_ROAD:{hazard_id}:{road_segment_id}", "ON_ROAD", hazard_id, road_segment_id, {})
+                self._merge_edge_sync(f"APPROACHING:{vehicle_id}:{road_segment_id}", "APPROACHING", vehicle_id, road_segment_id, {})
+
+                self._update_hazard_stats(hazard_id)
+
+                return {
+                    "hazard": self._normalize_hazard_record_sync(hazard_id),
+                    "hazardCreated": hazard_created,
+                    "observationCreated": observation_created,
                 }
-            else:
-                hz_props = dict(self._nodes[hazard_id].get("properties", {}))
-                hz_props["updated_at"] = timestamp
+            except Exception:
+                self._nodes = nodes_snapshot
+                self._edges = edges_snapshot
+                raise
 
-            if hazard_fields:
-                for k, v in hazard_fields.items():
-                    if v is not None:
-                        hz_props[k] = v
-
-            self._merge_node_sync(hazard_id, "Hazard", hazard_label or hazard_id, hz_props)
-
-            self._merge_node_sync(observation_id, "Observation", f"Observation {observation_id}", {
-                "type": hazard_type,
-                "timestamp": timestamp
-            })
-
-            self._merge_edge_sync(f"OBSERVED:{vehicle_id}:{observation_id}", "OBSERVED", vehicle_id, observation_id, {})
-            self._merge_edge_sync(f"SUPPORTS:{observation_id}:{hazard_id}", "SUPPORTS", observation_id, hazard_id, {})
-            self._merge_edge_sync(f"ON_ROAD:{hazard_id}:{road_segment_id}", "ON_ROAD", hazard_id, road_segment_id, {})
-            self._merge_edge_sync(f"APPROACHING:{vehicle_id}:{road_segment_id}", "APPROACHING", vehicle_id, road_segment_id, {})
-
-            self._update_hazard_stats(hazard_id)
-
-            return {
-                "hazard": self._normalize_hazard_record_sync(hazard_id),
-                "hazardCreated": hazard_created,
-                "observationCreated": observation_created,
-            }
-
-
-# ---------------------------------------------------------------------------
-# Neo4j backend (async driver, lazy import, sanitized errors)
-# ---------------------------------------------------------------------------
 
 class _Neo4jGraphBackend:
     def __init__(self) -> None:
@@ -1160,6 +1229,12 @@ class _Neo4jGraphBackend:
           AND h.status = 'active'
           AND h.latitude IS NOT NULL
           AND h.longitude IS NOT NULL
+          AND h.latitude = h.latitude
+          AND h.longitude = h.longitude
+          AND h.latitude >= -90.0 AND h.latitude <= 90.0
+          AND h.longitude >= -180.0 AND h.longitude <= 180.0
+          AND h.updated_at IS NOT NULL
+          AND h.updated_at = h.updated_at
           AND h.updated_at >= $min_updated_at
         WITH h,
              point({longitude: h.longitude, latitude: h.latitude}) as h_pt,
@@ -1219,15 +1294,113 @@ class _Neo4jGraphBackend:
         res = await tx.run(obs_query, obs_id=observation_id, scenario_id=SCENARIO_ID)
         obs_record = await res.single()
         obs_exists = False
+        is_idempotent = False
         if obs_record:
             obs_exists = obs_record["exists"]
             if obs_exists:
                 linked_v = obs_record["vehicle_id"]
                 linked_h = obs_record["hazard_id"]
-                if linked_v and linked_v != vehicle_id:
-                    raise ValueError(f"Observation {observation_id} is already linked to vehicle {linked_v}")
-                if linked_h and linked_h != hazard_id:
-                    raise ValueError(f"Observation {observation_id} is already linked to hazard {linked_h}")
+                if linked_v == vehicle_id and linked_h == hazard_id:
+                    is_idempotent = True
+                else:
+                    if linked_v and linked_v != vehicle_id:
+                        raise ValueError(f"Observation {observation_id} is already linked to vehicle {linked_v}")
+                    if linked_h and linked_h != hazard_id:
+                        raise ValueError(f"Observation {observation_id} is already linked to hazard {linked_h}")
+
+        if is_idempotent:
+            import json
+            hz_query = """
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
+            RETURN count(h) > 0 as exists, h as hazard_node, r.id as road_id
+            """
+            res = await tx.run(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+            hz_record = await res.single()
+            if not hz_record or not hz_record["exists"]:
+                raise ValueError(f"Hazard {hazard_id} does not exist or has invalid type")
+
+            h_node = hz_record["hazard_node"]
+            road_id = hz_record["road_id"]
+            props = dict(h_node)
+            if props.get("type") != hazard_type:
+                raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; expected {hazard_type}")
+            if road_id != road_segment_id:
+                raise ValueError(f"Hazard {hazard_id} is connected to road segment {road_id}; expected {road_segment_id}")
+
+            segment_id = road_id or ""
+
+            v_query = """
+            MATCH (v:SentinelPerception:Vehicle)-[:OBSERVED {scenario_id: $scenario_id}]->
+                  (o:SentinelPerception:Observation)-[:SUPPORTS {scenario_id: $scenario_id}]->
+                  (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            RETURN DISTINCT v.id as vehicle_id
+            """
+            res_v = await tx.run(v_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+            source_vehicles = []
+            async for r in res_v:
+                source_vehicles.append(r["vehicle_id"])
+            source_vehicles.sort()
+            source_count = len(source_vehicles)
+
+            if source_count == 1:
+                confidence = 60
+            elif source_count == 2:
+                confidence = 80
+            else:
+                confidence = 100 if source_count >= 3 else 60
+
+            polygon = props.get("polygon")
+            if isinstance(polygon, str):
+                try:
+                    polygon = json.loads(polygon)
+                except Exception:
+                    polygon = None
+            elif polygon is None:
+                polygon = props.get("polygon_json")
+                if isinstance(polygon, str):
+                    try:
+                        polygon = json.loads(polygon)
+                    except Exception:
+                        polygon = None
+
+            hazard_record = {
+                "id": hazard_id,
+                "type": props.get("type", ""),
+                "label": props.get("label", hazard_id),
+                "location": {
+                    "longitude": float(props.get("longitude", 0.0)),
+                    "latitude": float(props.get("latitude", 0.0)),
+                },
+                "segment_id": segment_id,
+                "status": props.get("status", "active"),
+                "created_at": float(props.get("created_at", 0.0)),
+                "updated_at": float(props.get("updated_at", 0.0)),
+                "sources": source_count,
+                "source_vehicles": source_vehicles,
+                "confidence": confidence,
+                "confirmed": int(props.get("confirmed", 0)),
+                "reportedIncorrect": int(props.get("reportedIncorrect", 0)),
+                "distanceMeters": props.get("distanceMeters") if props.get("distanceMeters") is None else float(props.get("distanceMeters")),
+                "direction": props.get("direction"),
+                "recommendedAction": props.get("recommendedAction"),
+                "risk": props.get("risk"),
+                "visibilityState": props.get("visibilityState"),
+                "sourceType": props.get("sourceType"),
+                "routeRelevance": props.get("routeRelevance"),
+                "polygon": polygon,
+                "model": props.get("model"),
+                "inferenceMode": props.get("inferenceMode"),
+                "sampleId": props.get("sampleId"),
+                "lastInferenceId": props.get("lastInferenceId"),
+                "replayConfidence": props.get("replayConfidence") if props.get("replayConfidence") is None else float(props.get("replayConfidence")),
+            }
+
+            return {
+                "hazard": hazard_record,
+                "hazardCreated": False,
+                "observationCreated": False,
+            }
 
         hz_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
@@ -1510,8 +1683,9 @@ RISK_LEVELS = {"low": 1, "medium": 2, "high": 3}
 def _validate_input_str(val: str, name: str) -> None:
     if not isinstance(val, str) or not val.strip():
         raise ValueError(f"{name} must be a non-empty string")
-
 def _validate_finite_float(val: float, name: str, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
+    if isinstance(val, bool):
+        raise ValueError(f"{name} must be a number, not a boolean")
     try:
         f = float(val)
     except (ValueError, TypeError):
@@ -1613,22 +1787,20 @@ class PerceptionGraphService:
                 await self._neo4j.initialize()
                 self._mode = "neo4j"
                 self._neo4j_connected = True
-            except Exception:
-                raise RuntimeError("Neo4j initialization failed in strict mode") from None
+            except Exception as e:
+                raise RuntimeError(f"initialization failed: {e}")
         else:
-            if not self._neo4j_enabled:
-                await self._memory.initialize()
-                self._mode = "memory"
-                self._memory_connected = True
-            else:
+            if self._neo4j_enabled:
                 try:
                     await self._neo4j.initialize()
                     self._mode = "neo4j"
                     self._neo4j_connected = True
+                    return
                 except Exception:
-                    await self._memory.initialize()
-                    self._mode = "memory"
-                    self._memory_connected = True
+                    self._neo4j_connected = False
+            await self._memory.initialize()
+            self._mode = "memory"
+            self._memory_connected = True
 
     async def close(self) -> None:
         try:
@@ -1789,9 +1961,12 @@ class PerceptionGraphService:
     ) -> dict:
         _validate_input_str(observation_id, "observation_id")
         _validate_input_str(vehicle_id, "vehicle_id")
+        _validate_input_str(vehicle_label, "vehicle_label")
         _validate_input_str(hazard_id, "hazard_id")
         _validate_input_str(hazard_type, "hazard_type")
+        _validate_input_str(hazard_label, "hazard_label")
         _validate_input_str(road_segment_id, "road_segment_id")
+        _validate_input_str(road_segment_name, "road_segment_name")
         lat = _validate_finite_float(latitude, "latitude", -90, 90)
         lon = _validate_finite_float(longitude, "longitude", -180, 180)
         ts = _validate_finite_float(timestamp, "timestamp", min_val=0.0)
