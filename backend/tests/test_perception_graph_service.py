@@ -166,7 +166,7 @@ class FakeNeo4jModule:
 def clear_neo4j_env(monkeypatch):
     """Ensure no test can accidentally connect to a real Neo4j instance."""
     for key in list(os.environ.keys()):
-        if key.startswith("NEO4J_"):
+        if key.startswith("NEO4J_") or key == "SENTINEL_NEO4J_STRICT":
             monkeypatch.delenv(key, raising=False)
     yield
 
