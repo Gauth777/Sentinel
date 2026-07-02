@@ -26,6 +26,8 @@ class MockRecord:
         return self._data.keys()
     def __iter__(self):
         return iter(self._data)
+    def data(self):
+        return dict(self._data)
 
 class MockResult:
     def __init__(self, records):
@@ -1088,3 +1090,263 @@ async def test_hazard_fields_safety_checks():
     assert res["hazard"]["distanceMeters"] == 150.0
     assert isinstance(res["hazard"]["replayConfidence"], float)
     assert res["hazard"]["replayConfidence"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Scenario Isolation Tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_memory_source_count_ignores_cross_scenario_vehicle():
+    """Source count must not include a Vehicle whose scenarioId differs."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    # Create a valid first observation via the facade
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazard"]["sources"] == 1
+
+    # Manually inject a second vehicle with a different scenario
+    svc._memory._merge_node_sync("v-cross", "Vehicle", "Cross Vehicle", {})
+    svc._memory._nodes["v-cross"]["scenarioId"] = "other-scenario"
+    svc._memory._merge_node_sync("obs-2", "Observation", "Obs 2", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:v-cross:obs-2", "OBSERVED", "v-cross", "obs-2", {})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-2:hz-1", "SUPPORTS", "obs-2", "hz-1", {})
+
+    # Normalize: cross-scenario vehicle must not be counted
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "v-cross" not in hazard["source_vehicles"]
+
+
+@pytest.mark.anyio
+async def test_memory_source_count_ignores_cross_scenario_observation():
+    """Source count must not traverse an Observation whose scenarioId differs."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazard"]["sources"] == 1
+
+    # Manually inject a second observation with a different scenario
+    svc._memory._merge_node_sync("v-2", "Vehicle", "V2", {})
+    svc._memory._merge_node_sync("obs-cross", "Observation", "Obs Cross", {"type": "pothole"})
+    svc._memory._nodes["obs-cross"]["scenarioId"] = "other-scenario"
+    svc._memory._merge_edge_sync("OBSERVED:v-2:obs-cross", "OBSERVED", "v-2", "obs-cross", {})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-cross:hz-1", "SUPPORTS", "obs-cross", "hz-1", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "v-2" not in hazard["source_vehicles"]
+
+
+@pytest.mark.anyio
+async def test_memory_source_count_ignores_cross_scenario_edges():
+    """Source count must not traverse OBSERVED/SUPPORTS edges with wrong scenarioId."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazard"]["sources"] == 1
+
+    # Inject valid nodes but with cross-scenario edges
+    svc._memory._merge_node_sync("v-2", "Vehicle", "V2", {})
+    svc._memory._merge_node_sync("obs-2", "Observation", "Obs 2", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:v-2:obs-2", "OBSERVED", "v-2", "obs-2", {})
+    svc._memory._edges["OBSERVED:v-2:obs-2"]["scenarioId"] = "other-scenario"
+    svc._memory._merge_edge_sync("SUPPORTS:obs-2:hz-1", "SUPPORTS", "obs-2", "hz-1", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "v-2" not in hazard["source_vehicles"]
+
+    # Now test cross-scenario SUPPORTS
+    svc._memory._edges["OBSERVED:v-2:obs-2"]["scenarioId"] = SCENARIO_ID
+    svc._memory._edges["SUPPORTS:obs-2:hz-1"]["scenarioId"] = "other-scenario"
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "v-2" not in hazard["source_vehicles"]
+
+
+@pytest.mark.anyio
+async def test_memory_source_count_ignores_wrong_type_nodes():
+    """Source count must not include nodes with wrong type labels."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazard"]["sources"] == 1
+
+    # Inject a node with type "Warning" where a "Vehicle" is expected
+    svc._memory._merge_node_sync("not-a-vehicle", "Warning", "W1", {})
+    svc._memory._merge_node_sync("obs-2", "Observation", "Obs 2", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:not-a-vehicle:obs-2", "OBSERVED", "not-a-vehicle", "obs-2", {})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-2:hz-1", "SUPPORTS", "obs-2", "hz-1", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "not-a-vehicle" not in hazard["source_vehicles"]
+
+    # Inject a node with type "Hazard" where "Observation" is expected
+    svc._memory._merge_node_sync("v-3", "Vehicle", "V3", {})
+    svc._memory._merge_node_sync("not-an-obs", "Hazard", "H2", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:v-3:not-an-obs", "OBSERVED", "v-3", "not-an-obs", {})
+    svc._memory._merge_edge_sync("SUPPORTS:not-an-obs:hz-1", "SUPPORTS", "not-an-obs", "hz-1", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 1
+    assert "v-3" not in hazard["source_vehicles"]
+
+
+@pytest.mark.anyio
+async def test_memory_segment_ignores_cross_scenario_road():
+    """Segment normalization must not return a cross-scenario RoadSegment."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    svc._memory._merge_node_sync("hz-1", "Hazard", "P1", {
+        "type": "pothole", "latitude": 37.7749, "longitude": -122.4194,
+        "status": "active", "created_at": 1000.0, "updated_at": 1000.0
+    })
+    svc._memory._merge_node_sync("road-cross", "RoadSegment", "Cross Road", {})
+    svc._memory._nodes["road-cross"]["scenarioId"] = "other-scenario"
+    svc._memory._merge_edge_sync("ON_ROAD:hz-1:road-cross", "ON_ROAD", "hz-1", "road-cross", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["segment_id"] == ""
+
+    # Also test wrong-type node masquerading as a road
+    svc._memory._merge_node_sync("not-a-road", "Vehicle", "V1", {})
+    svc._memory._merge_edge_sync("ON_ROAD:hz-1:not-a-road", "ON_ROAD", "hz-1", "not-a-road", {})
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["segment_id"] == ""
+
+
+@pytest.mark.anyio
+async def test_neo4j_source_stat_queries_scope_all_nodes(monkeypatch):
+    """Neo4j source/stat queries must scope Vehicle, Observation, Hazard and RoadSegment nodes."""
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
+    monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    # Mock _get_normalized_hazard_neo4j: road query + source query
+    mock_driver.result_queue.append([{
+        "h": {"id": "hz-1", "type": "pothole", "latitude": 37.0, "longitude": -122.0},
+        "segment_id": "road-1"
+    }])
+    mock_driver.result_queue.append([{"vehicle_id": "v-1"}, {"vehicle_id": "v-2"}])
+
+    await svc._neo4j._get_normalized_hazard_neo4j("hz-1")
+
+    # Road query
+    road_query = mock_driver.queries[0][0]
+    assert "{scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})" in road_query
+
+    # Source query
+    src_query = mock_driver.queries[1][0]
+    assert "(v:SentinelPerception:Vehicle {scenario_id: $scenario_id})" in src_query
+    assert "(o:SentinelPerception:Observation {scenario_id: $scenario_id})" in src_query
+    assert "(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})" in src_query
+
+
+@pytest.mark.anyio
+async def test_neo4j_similarity_excludes_infinite_updated_at(monkeypatch):
+    """Similarity Cypher must explicitly exclude positive infinity on updated_at."""
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
+    monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{"hazard_id": "hz-1", "dist": 5.0}])
+    mock_driver.result_queue.append([{
+        "h": {"id": "hz-1", "latitude": 37.0, "longitude": -122.0},
+        "segment_id": "road-1"
+    }])
+    mock_driver.result_queue.append([{"vehicle_id": "v-1"}])
+
+    await svc.find_similar_active_hazard(
+        hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
+        road_segment_id="road-1", radius_m=500.0, min_updated_at=1000.0
+    )
+
+    find_query = mock_driver.queries[0][0]
+    assert "h_updated < 1.0e308" in find_query
+    assert "h_updated = h_updated" in find_query
+    assert "h_updated >= 0.0" in find_query
+
+
+@pytest.mark.anyio
+async def test_three_vehicle_source_count_confidence_100():
+    """Three distinct vehicles must produce confidence 100."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    for i in range(1, 4):
+        await svc.upsert_observation_and_hazard(
+            observation_id=f"obs-{i}", vehicle_id=f"v-{i}", vehicle_label=f"V{i}",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+            road_segment_name="Road 1", timestamp=1000.0 + i
+        )
+
+    hazard = svc._memory._normalize_hazard_record_sync("hz-1")
+    assert hazard["sources"] == 3
+    assert hazard["confidence"] == 100
+    assert sorted(hazard["source_vehicles"]) == ["v-1", "v-2", "v-3"]
+
+
+@pytest.mark.anyio
+async def test_memory_update_hazard_stats_ignores_cross_scenario():
+    """_update_hazard_stats must not count cross-scenario contributions."""
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    # Create initial valid data
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazard"]["sources"] == 1
+
+    # Manually inject a second vehicle with cross-scenario edges
+    svc._memory._merge_node_sync("v-2", "Vehicle", "V2", {})
+    svc._memory._merge_node_sync("obs-2", "Observation", "Obs 2", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:v-2:obs-2", "OBSERVED", "v-2", "obs-2", {})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-2:hz-1", "SUPPORTS", "obs-2", "hz-1", {})
+    svc._memory._edges["SUPPORTS:obs-2:hz-1"]["scenarioId"] = "other-scenario"
+
+    # Re-run stats
+    svc._memory._update_hazard_stats("hz-1")
+    props = svc._memory._nodes["hz-1"]["properties"]
+    assert props["sourceCount"] == 1
+    assert props["confidence"] == 60
+
