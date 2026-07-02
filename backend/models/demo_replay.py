@@ -254,3 +254,28 @@ class DemoReplayReloadResponse(BaseModel):
     current_index: int
     current_sample_id: Optional[str] = None
     loop: bool
+
+
+class DemoReplayEvidenceResponse(BaseModel):
+    """GET /api/sentinel/demo-replay/samples/{sample_id}/evidence"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    sample_id: str
+    source_sample_id: Optional[str] = None
+    expected_labels: Optional[DemoExpectedLabels] = None
+    source_map_available: bool = False
+
+
+class DemoReplayGraphVerifyResponse(BaseModel):
+    """GET /api/sentinel/demo-replay/graph-verify?hazardId=..."""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_to_camel)
+
+    hazard_id: str
+    graph_backend: str  # "neo4j" | "in_memory"
+    hazard_node_found: bool = False
+    observation_node_found: bool = False
+    relationship_found: bool = False
+    warning_node_found: bool = False
+    summary: str = ""

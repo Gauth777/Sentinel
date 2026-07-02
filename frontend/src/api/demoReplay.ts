@@ -6,6 +6,8 @@ import type {
   DemoReplayAdvanceResponse,
   DemoReplayResetResponse,
   DemoReplayInferenceResponse,
+  DemoReplayEvidenceResponse,
+  DemoReplayGraphVerifyResponse,
 } from "@/src/types/demoReplay";
 
 function backendBase() {
@@ -71,6 +73,16 @@ export const demoReplayApi = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ activate }),
       }
+    ),
+
+  getEvidence: (sampleId: string) =>
+    j<DemoReplayEvidenceResponse>(
+      `/api/sentinel/demo-replay/samples/${encodeURIComponent(sampleId)}/evidence`
+    ),
+
+  getGraphVerification: (hazardId: string) =>
+    j<DemoReplayGraphVerifyResponse>(
+      `/api/sentinel/demo-replay/graph-verify?hazardId=${encodeURIComponent(hazardId)}`
     ),
 
   getDashcamUrl: (sampleId: string) => {
