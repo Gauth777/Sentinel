@@ -106,7 +106,7 @@ async def test_upsert_creates_hazard_and_observation():
     )
     assert res["hazardCreated"] is True
     assert res["observationCreated"] is True
-    
+
     hz = res["hazard"]
     assert hz["id"] == "hz-1"
     assert hz["type"] == "construction"
@@ -127,7 +127,7 @@ async def test_upsert_idempotent():
     # 5. Duplicate identical observation is idempotent.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # First upsert
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
@@ -142,7 +142,7 @@ async def test_upsert_idempotent():
         road_segment_name="Market St",
         timestamp=1000.0
     )
-    
+
     # Duplicate identical upsert
     res = await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
@@ -167,7 +167,7 @@ async def test_upsert_vehicle_conflict():
     # 6. Duplicate observation with different vehicle raises ValueError.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
         vehicle_id="v-1",
@@ -181,7 +181,7 @@ async def test_upsert_vehicle_conflict():
         road_segment_name="Market St",
         timestamp=1000.0
     )
-    
+
     with pytest.raises(ValueError, match="already linked to vehicle"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-1",
@@ -202,7 +202,7 @@ async def test_upsert_hazard_conflict():
     # 7. Duplicate observation with different hazard raises ValueError.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
         vehicle_id="v-1",
@@ -216,7 +216,7 @@ async def test_upsert_hazard_conflict():
         road_segment_name="Market St",
         timestamp=1000.0
     )
-    
+
     with pytest.raises(ValueError, match="already linked to hazard"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-1",
@@ -237,7 +237,7 @@ async def test_upsert_type_conflict():
     # 8. Existing hazard with different type raises ValueError.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
         vehicle_id="v-1",
@@ -251,7 +251,7 @@ async def test_upsert_type_conflict():
         road_segment_name="Market St",
         timestamp=1000.0
     )
-    
+
     with pytest.raises(ValueError, match="exists with type"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-2",
@@ -272,7 +272,7 @@ async def test_upsert_road_segment_conflict():
     # 9. Existing hazard with different road segment raises ValueError.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1",
         vehicle_id="v-1",
@@ -286,7 +286,7 @@ async def test_upsert_road_segment_conflict():
         road_segment_name="Market St",
         timestamp=1000.0
     )
-    
+
     with pytest.raises(ValueError, match="already connected to road segment"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-2",
@@ -310,7 +310,7 @@ async def test_multi_vehicle_confidence():
     # 13. source_vehicles is unique and sorted.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # 1st vehicle
     res1 = await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
@@ -321,7 +321,7 @@ async def test_multi_vehicle_confidence():
     assert res1["hazard"]["sources"] == 1
     assert res1["hazard"]["confidence"] == 60
     assert res1["hazard"]["source_vehicles"] == ["v-1"]
-    
+
     # Same vehicle, another observation
     res2 = await svc.upsert_observation_and_hazard(
         observation_id="obs-2", vehicle_id="v-1", vehicle_label="V1",
@@ -331,7 +331,7 @@ async def test_multi_vehicle_confidence():
     )
     assert res2["hazard"]["sources"] == 1
     assert res2["hazard"]["confidence"] == 60
-    
+
     # 2nd vehicle
     res3 = await svc.upsert_observation_and_hazard(
         observation_id="obs-3", vehicle_id="v-3", vehicle_label="V3",
@@ -342,7 +342,7 @@ async def test_multi_vehicle_confidence():
     assert res3["hazard"]["sources"] == 2
     assert res3["hazard"]["confidence"] == 80
     assert res3["hazard"]["source_vehicles"] == ["v-1", "v-3"]  # sorted
-    
+
     # 3rd vehicle
     res4 = await svc.upsert_observation_and_hazard(
         observation_id="obs-4", vehicle_id="v-2", vehicle_label="V2",
@@ -360,7 +360,7 @@ async def test_find_similar_active_hazard_filtering():
     # 16. Resolved hazards are not returned as similar matches.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # Create an active hazard
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
@@ -369,7 +369,7 @@ async def test_find_similar_active_hazard_filtering():
         road_segment_name="Road 1", timestamp=1000.0,
         hazard_fields={"status": "active"}
     )
-    
+
     # Create a resolved hazard
     await svc.upsert_observation_and_hazard(
         observation_id="obs-2", vehicle_id="v-2", vehicle_label="V2",
@@ -378,7 +378,7 @@ async def test_find_similar_active_hazard_filtering():
         road_segment_name="Road 1", timestamp=1005.0,
         hazard_fields={"status": "resolved"}
     )
-    
+
     # Try finding similar hazard
     # 1. Matching type and active status on road-1
     res = await svc.find_similar_active_hazard(
@@ -387,28 +387,28 @@ async def test_find_similar_active_hazard_filtering():
     )
     assert res is not None
     assert res["hazard"]["id"] == "hz-active"
-    
+
     # 2. Type mismatch
     res_type = await svc.find_similar_active_hazard(
         hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
         road_segment_id="road-1", radius_m=500.0, min_updated_at=999.0
     )
     assert res_type is None
-    
+
     # 3. Road segment mismatch
     res_road = await svc.find_similar_active_hazard(
         hazard_type="construction", latitude=37.7749, longitude=-122.4194,
         road_segment_id="road-2", radius_m=500.0, min_updated_at=999.0
     )
     assert res_road is None
-    
+
     # 4. Out of radius
     res_radius = await svc.find_similar_active_hazard(
         hazard_type="construction", latitude=37.7800, longitude=-122.4200,
         road_segment_id="road-1", radius_m=500.0, min_updated_at=999.0
     )
     assert res_radius is None
-    
+
     # 5. min_updated_at filter
     res_time = await svc.find_similar_active_hazard(
         hazard_type="construction", latitude=37.7749, longitude=-122.4194,
@@ -421,33 +421,33 @@ async def test_find_similar_active_hazard_ordering():
     # 15. Similar-hazard ordering is deterministic.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # 3 active hazards on same road, same type, all within radius
     # hz-1: dist=11m, updated_at=1000.0
     # hz-2: dist=22m, updated_at=1005.0
     # hz-3: dist=11m, updated_at=1005.0
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
         hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
         latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
         road_segment_name="Road 1", timestamp=1000.0
     )
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-2", vehicle_id="v-2", vehicle_label="V2",
         hazard_id="hz-2", hazard_type="pothole", hazard_label="P2",
         latitude=37.7750, longitude=-122.4195, road_segment_id="road-1",
         road_segment_name="Road 1", timestamp=1005.0
     )
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-3", vehicle_id="v-3", vehicle_label="V3",
         hazard_id="hz-3", hazard_type="pothole", hazard_label="P3",
         latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
         road_segment_name="Road 1", timestamp=1005.0
     )
-    
+
     # Query from 37.7749, -122.4194 (same as hz-1 and hz-3)
     res = await svc.find_similar_active_hazard(
         hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
@@ -463,7 +463,7 @@ async def test_risk_decrease_prevented():
     # 17. Risk cannot decrease on an existing hazard.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
         hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
@@ -471,7 +471,7 @@ async def test_risk_decrease_prevented():
         road_segment_name="Road 1", timestamp=1000.0,
         hazard_fields={"risk": "high"}
     )
-    
+
     with pytest.raises(ValueError, match="Cannot decrease risk level"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-2", vehicle_id="v-2", vehicle_label="V2",
@@ -487,7 +487,7 @@ async def test_validation_rules():
     # 19. Invalid coordinates and numeric values are rejected.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # Unknown key
     with pytest.raises(ValueError, match="Unknown key in hazard_fields"):
         await svc.upsert_observation_and_hazard(
@@ -497,7 +497,7 @@ async def test_validation_rules():
             road_segment_name="Road 1", timestamp=1000.0,
             hazard_fields={"unknownKey": 123}
         )
-        
+
     # Invalid coordinates
     with pytest.raises(ValueError, match="latitude must be <= 90"):
         await svc.upsert_observation_and_hazard(
@@ -506,7 +506,7 @@ async def test_validation_rules():
             latitude=95.0, longitude=-122.4194, road_segment_id="road-1",
             road_segment_name="Road 1", timestamp=1000.0
         )
-        
+
     with pytest.raises(ValueError, match="longitude must be >= -180"):
         await svc.upsert_observation_and_hazard(
             observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
@@ -520,7 +520,7 @@ async def test_validation_failure_no_mutation():
     # 20. Failure leaves memory graph unchanged.
     svc = PerceptionGraphService()
     await svc.initialize()
-    
+
     # Create initial state
     await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
@@ -529,7 +529,7 @@ async def test_validation_failure_no_mutation():
         road_segment_name="Road 1", timestamp=1000.0,
         hazard_fields={"risk": "medium"}
     )
-    
+
     # Try updating but fail with validation
     with pytest.raises(ValueError, match="Cannot decrease risk level"):
         await svc.upsert_observation_and_hazard(
@@ -539,7 +539,7 @@ async def test_validation_failure_no_mutation():
             road_segment_name="Road 1", timestamp=1001.0,
             hazard_fields={"risk": "low"}
         )
-        
+
     # Check that hazard remained unchanged
     graph_res = await svc.build_graph(hazard_id="hz-1")
     hz_node = next(n for n in graph_res["nodes"] if n["id"] == "hz-1")
@@ -555,19 +555,19 @@ async def test_neo4j_queries_scenario_scoped(monkeypatch):
     # 21. Queries are scoped by scenario_id.
     svc = PerceptionGraphService()
     mock_driver = MockNeo4jDriver()
-    
+
     monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
     monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
     svc._mode = "neo4j"
     svc._neo4j_connected = True
-    
+
     # Mock return values for get_observation_hazard query
     mock_driver.result_queue.append([{"hazard_id": "hz-1"}])  # lookup
     mock_driver.result_queue.append([{"h": {"id": "hz-1", "latitude": 37.0, "longitude": -122.0}, "segment_id": "road-1"}]) # norm
     mock_driver.result_queue.append([{"vehicle_id": "v-1"}]) # vehicles
-    
+
     await svc.get_observation_hazard("obs-1")
-    
+
     # Verify that scenario_id was passed to the query
     assert len(mock_driver.queries) > 0
     for query, params in mock_driver.queries:
@@ -581,21 +581,21 @@ async def test_neo4j_find_similar_cypher(monkeypatch):
     # 24. Deterministic ORDER BY is present.
     svc = PerceptionGraphService()
     mock_driver = MockNeo4jDriver()
-    
+
     monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
     monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
     svc._mode = "neo4j"
     svc._neo4j_connected = True
-    
+
     mock_driver.result_queue.append([{"hazard_id": "hz-1", "dist": 5.0}])  # find query
     mock_driver.result_queue.append([{"h": {"id": "hz-1", "latitude": 37.0, "longitude": -122.0}, "segment_id": "road-1"}]) # norm query
     mock_driver.result_queue.append([{"vehicle_id": "v-1"}]) # vehicles query
-    
+
     await svc.find_similar_active_hazard(
         hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
         road_segment_id="road-1", radius_m=500.0, min_updated_at=1000.0
     )
-    
+
     # Extract query
     find_query, params = mock_driver.queries[0]
     assert "point.distance" in find_query
@@ -610,12 +610,12 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
     # 27. Idempotent retry returns observationCreated=false.
     svc = PerceptionGraphService()
     mock_driver = MockNeo4jDriver()
-    
+
     monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
     monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
     svc._mode = "neo4j"
     svc._neo4j_connected = True
-    
+
     # 1. First mock results for a non-existing obs and non-existing hazard
     mock_driver.result_queue.append([{"exists": False, "vehicle_id": None, "hazard_id": None}]) # obs exists
     mock_driver.result_queue.append([{"exists": False, "hazard_node": None, "road_id": None}]) # hazard exists
@@ -629,21 +629,21 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
     mock_driver.result_queue.append([{"h": {"id": "hz-1", "latitude": 37.7749, "longitude": -122.4194}, "segment_id": "road-1"}])
     # vehicles query
     mock_driver.result_queue.append([{"vehicle_id": "v-1"}])
-    
+
     res = await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
         hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
         latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
         road_segment_name="Road 1", timestamp=1000.0
     )
-    
+
     assert res["hazardCreated"] is True
     assert res["observationCreated"] is True
-    
+
     # 2. Duplicate idempotent retry
     mock_driver.result_queue.clear()
     mock_driver.queries.clear()
-    
+
     mock_driver.result_queue.append([{"exists": True, "vehicle_id": "v-1", "hazard_id": "hz-1"}]) # obs exists
     mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole"}, "road_id": "road-1"}]) # hazard exists
     mock_driver.result_queue.append([]) # merge V
@@ -654,7 +654,7 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
     mock_driver.result_queue.append([]) # stats query
     mock_driver.result_queue.append([{"h": {"id": "hz-1", "latitude": 37.7749, "longitude": -122.4194}, "segment_id": "road-1"}]) # norm
     mock_driver.result_queue.append([{"vehicle_id": "v-1"}]) # vehicles
-    
+
     res2 = await svc.upsert_observation_and_hazard(
         observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
         hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
@@ -669,16 +669,16 @@ async def test_neo4j_validation_failure_rolls_back(monkeypatch):
     # 26. Validation failure rolls back/no write query is committed.
     svc = PerceptionGraphService()
     mock_driver = MockNeo4jDriver()
-    
+
     monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
     monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
     svc._mode = "neo4j"
     svc._neo4j_connected = True
-    
-    # Mock existing hazard with risk high
-    mock_driver.result_queue.append([{"exists": True, "vehicle_id": "v-1", "hazard_id": "hz-1"}]) # obs exists
+
+    # Mock existing hazard with risk high (new observation)
+    mock_driver.result_queue.append([{"exists": False, "vehicle_id": None, "hazard_id": None}]) # obs does not exist
     mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole", "risk": "high"}, "road_id": "road-1"}]) # hazard exists
-    
+
     # Try upserting with lower risk
     with pytest.raises(ValueError, match="Cannot decrease risk level"):
         await svc.upsert_observation_and_hazard(
@@ -688,7 +688,7 @@ async def test_neo4j_validation_failure_rolls_back(monkeypatch):
             road_segment_name="Road 1", timestamp=1000.0,
             hazard_fields={"risk": "medium"}
         )
-        
+
     # Verify no writing MERGE or CREATE queries were run
     for q, p in mock_driver.queries:
         assert "MERGE" not in q
@@ -701,15 +701,15 @@ async def test_strict_mode_dispatch_rules(monkeypatch):
     svc = PerceptionGraphService()
     monkeypatch.setenv("SENTINEL_NEO4J_STRICT", "true")
     monkeypatch.setenv("NEO4J_ENABLED", "true")
-    
+
     # Mock Neo4j initialize to fail
     async def mock_neo4j_init_fail():
         raise RuntimeError("Neo4j connection failed")
     monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_fail)
-    
+
     with pytest.raises(RuntimeError, match="initialization failed"):
         await svc.initialize()
-        
+
     with pytest.raises(RuntimeError, match="Active mode is not neo4j"):
         await svc.get_observation_hazard("obs-1")
 
@@ -726,3 +726,220 @@ async def test_strict_mode_dispatch_rules(monkeypatch):
             latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
             road_segment_name="Road 1", timestamp=1000.0
         )
+
+
+@pytest.mark.anyio
+async def test_idempotent_retry_memory():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    res1 = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0,
+        hazard_fields={"risk": "medium", "status": "active"}
+    )
+    assert res1["hazardCreated"] is True
+    assert res1["observationCreated"] is True
+    assert res1["hazard"]["updated_at"] == 1000.0
+    assert res1["hazard"]["risk"] == "medium"
+
+    res2 = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1005.0,
+        hazard_fields={"risk": "high", "status": "resolved"}
+    )
+    assert res2["hazardCreated"] is False
+    assert res2["observationCreated"] is False
+    assert res2["hazard"]["updated_at"] == 1000.0
+    assert res2["hazard"]["risk"] == "medium"
+    assert res2["hazard"]["status"] == "active"
+
+
+@pytest.mark.anyio
+async def test_idempotent_retry_neo4j_queries(monkeypatch):
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+
+    monkeypatch.setattr(svc._neo4j, "_driver", mock_driver)
+    monkeypatch.setattr(svc._neo4j, "_database", "neo4j")
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{"exists": True, "vehicle_id": "v-1", "hazard_id": "hz-1"}])
+    mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole", "latitude": 37.0, "longitude": -122.0}, "road_id": "road-1"}])
+    mock_driver.result_queue.append([{"vehicle_id": "v-1"}])
+
+    res = await svc.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+        latitude=37.7749, longitude=-122.4194, road_segment_id="road-1",
+        road_segment_name="Road 1", timestamp=1000.0
+    )
+    assert res["hazardCreated"] is False
+    assert res["observationCreated"] is False
+
+    for query, params in mock_driver.queries:
+        upper_query = query.upper()
+        assert "MERGE" not in upper_query
+        assert "CREATE" not in upper_query
+        assert "SET" not in upper_query
+
+
+@pytest.mark.anyio
+async def test_memory_atomic_rollback_late_failure():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    svc._memory._merge_node_sync("road-conflict", "Vehicle", "Conflicting Vehicle Node", {})
+
+    initial_nodes = dict(svc._memory._nodes)
+    initial_edges = dict(svc._memory._edges)
+
+    with pytest.raises(ValueError, match="cannot merge as RoadSegment"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-new", vehicle_label="VNew",
+            hazard_id="hz-1", hazard_type="pothole", hazard_label="P1",
+            latitude=37.7749, longitude=-122.4194, road_segment_id="road-conflict",
+            road_segment_name="Road Conflict", timestamp=1000.0
+        )
+
+    assert svc._memory._nodes == initial_nodes
+    assert svc._memory._edges == initial_edges
+
+
+@pytest.mark.anyio
+async def test_memory_observation_lookup_complete_path():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    svc._memory._merge_node_sync("obs-only", "Observation", "Obs Only", {"type": "pothole"})
+    svc._memory._merge_node_sync("hz-only", "Hazard", "Hz Only", {"type": "pothole"})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-only:hz-only", "SUPPORTS", "obs-only", "hz-only", {})
+    assert await svc.get_observation_hazard("obs-only") is None
+
+    svc._memory._merge_node_sync("source-hz", "Hazard", "Source Hz", {"type": "pothole"})
+    svc._memory._merge_edge_sync("OBSERVED:source-hz:obs-only", "OBSERVED", "source-hz", "obs-only", {})
+    assert await svc.get_observation_hazard("obs-only") is None
+
+    del svc._memory._edges["OBSERVED:source-hz:obs-only"]
+
+    svc._memory._merge_node_sync("v-1", "Vehicle", "V1", {})
+    svc._memory._merge_edge_sync("OBSERVED:v-1:obs-only", "OBSERVED", "v-1", "obs-only", {})
+    del svc._memory._edges["SUPPORTS:obs-only:hz-only"]
+    assert await svc.get_observation_hazard("obs-only") is None
+
+    svc._memory._merge_node_sync("hz-bad", "Vehicle", "Hz Bad", {})
+    svc._memory._merge_edge_sync("SUPPORTS:obs-only:hz-bad", "SUPPORTS", "obs-only", "hz-bad", {})
+    assert await svc.get_observation_hazard("obs-only") is None
+
+
+@pytest.mark.anyio
+async def test_required_string_validation():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    async def assert_val_err(**kwargs):
+        base = {
+            "observation_id": "obs-1", "vehicle_id": "v-1", "vehicle_label": "V1",
+            "hazard_id": "hz-1", "hazard_type": "pothole", "hazard_label": "P1",
+            "latitude": 37.7749, "longitude": -122.4194, "road_segment_id": "road-1",
+            "road_segment_name": "Road 1", "timestamp": 1000.0
+        }
+        base.update(kwargs)
+        with pytest.raises(ValueError):
+            await svc.upsert_observation_and_hazard(**base)
+
+    await assert_val_err(observation_id="")
+    await assert_val_err(observation_id="   ")
+    await assert_val_err(vehicle_id="")
+    await assert_val_err(vehicle_label="")
+    await assert_val_err(hazard_id="")
+    await assert_val_err(hazard_type="")
+    await assert_val_err(hazard_label="")
+    await assert_val_err(road_segment_id="")
+    await assert_val_err(road_segment_name="")
+
+    await assert_val_err(observation_id=123)
+    await assert_val_err(vehicle_id=True)
+    await assert_val_err(hazard_label=None)
+
+
+@pytest.mark.anyio
+async def test_boolean_numeric_validation():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    async def assert_bool_rejected(**kwargs):
+        base = {
+            "observation_id": "obs-1", "vehicle_id": "v-1", "vehicle_label": "V1",
+            "hazard_id": "hz-1", "hazard_type": "pothole", "hazard_label": "P1",
+            "latitude": 37.7749, "longitude": -122.4194, "road_segment_id": "road-1",
+            "road_segment_name": "Road 1", "timestamp": 1000.0
+        }
+        base.update(kwargs)
+        with pytest.raises(ValueError, match="must be a number, not a boolean"):
+            await svc.upsert_observation_and_hazard(**base)
+
+    await assert_bool_rejected(latitude=True)
+    await assert_bool_rejected(longitude=False)
+    await assert_bool_rejected(timestamp=True)
+
+    with pytest.raises(ValueError, match="must be a number, not a boolean"):
+        await svc.find_similar_active_hazard(
+            hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
+            road_segment_id="road-1", radius_m=True, min_updated_at=1000.0
+        )
+
+
+@pytest.mark.anyio
+async def test_malformed_stored_hazards_skipped():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    svc._memory._merge_node_sync("road-1", "RoadSegment", "Road 1", {})
+
+    async def create_malformed_hazard(hz_id, props):
+        svc._memory._merge_node_sync(hz_id, "Hazard", hz_id, props)
+        svc._memory._merge_edge_sync(f"ON_ROAD:{hz_id}:road-1", "ON_ROAD", hz_id, "road-1", {})
+
+    await create_malformed_hazard("hz-valid", {
+        "type": "pothole", "latitude": 37.7749, "longitude": -122.4194,
+        "status": "active", "updated_at": 1000.0
+    })
+
+    await create_malformed_hazard("hz-bad-lat1", {
+        "type": "pothole", "latitude": "not-a-number", "longitude": -122.4194,
+        "status": "active", "updated_at": 1000.0
+    })
+    await create_malformed_hazard("hz-bad-lat2", {
+        "type": "pothole", "latitude": True, "longitude": -122.4194,
+        "status": "active", "updated_at": 1000.0
+    })
+    import math
+    await create_malformed_hazard("hz-bad-lat3", {
+        "type": "pothole", "latitude": float("nan"), "longitude": -122.4194,
+        "status": "active", "updated_at": 1000.0
+    })
+    await create_malformed_hazard("hz-bad-lon", {
+        "type": "pothole", "latitude": 37.7749, "longitude": 200.0,
+        "status": "active", "updated_at": 1000.0
+    })
+    await create_malformed_hazard("hz-bad-status", {
+        "type": "pothole", "latitude": 37.7749, "longitude": -122.4194,
+        "status": "invalid-status-value", "updated_at": 1000.0
+    })
+    await create_malformed_hazard("hz-bad-upd", {
+        "type": "pothole", "latitude": 37.7749, "longitude": -122.4194,
+        "status": "active", "updated_at": float("inf")
+    })
+
+    res = await svc.find_similar_active_hazard(
+        hazard_type="pothole", latitude=37.7749, longitude=-122.4194,
+        road_segment_id="road-1", radius_m=500.0, min_updated_at=999.0
+    )
+    assert res is not None
+    assert res["hazard"]["id"] == "hz-valid"
