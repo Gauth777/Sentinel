@@ -41,18 +41,19 @@ export default function ReplayEvidencePanel({
 
   if (!inference) return null;
 
-  const actual = inference.prediction;
   const expected = evidence?.expectedLabels;
+  const actual = evidence?.actualPrediction;
+  const fieldMatches = evidence?.fieldMatches;
 
-  // Compute field comparison mapping if expected labels are available
-  const fields = expected
+  // Compute field comparison mapping if expected and actual are available from evidence
+  const fields = (expected && actual)
     ? [
-        { key: "roadType", label: "ROAD TYPE", exp: expected.roadType, act: actual.roadType },
-        { key: "trafficDensity", label: "TRAFFIC DENSITY", exp: expected.trafficDensity, act: actual.trafficDensity },
-        { key: "roadComplexity", label: "ROAD COMPLEXITY", exp: expected.roadComplexity, act: actual.roadComplexity },
-        { key: "hazardPresence", label: "HAZARD DETECTED", exp: expected.hazardPresence, act: actual.hazardPresence },
-        { key: "anticipatedRisk", label: "ANTICIPATED RISK", exp: expected.anticipatedRisk, act: actual.anticipatedRisk },
-        { key: "recommendedAction", label: "RECOMMENDED ACTION", exp: expected.recommendedAction, act: actual.recommendedAction },
+        { key: "roadType", label: "ROAD TYPE", exp: expected.roadType, act: actual.roadType, matches: fieldMatches?.["roadType"] ?? false },
+        { key: "trafficDensity", label: "TRAFFIC DENSITY", exp: expected.trafficDensity, act: actual.trafficDensity, matches: fieldMatches?.["trafficDensity"] ?? false },
+        { key: "roadComplexity", label: "ROAD COMPLEXITY", exp: expected.roadComplexity, act: actual.roadComplexity, matches: fieldMatches?.["roadComplexity"] ?? false },
+        { key: "hazardPresence", label: "HAZARD DETECTED", exp: expected.hazardPresence, act: actual.hazardPresence, matches: fieldMatches?.["hazardPresence"] ?? false },
+        { key: "anticipatedRisk", label: "ANTICIPATED RISK", exp: expected.anticipatedRisk, act: actual.anticipatedRisk, matches: fieldMatches?.["anticipatedRisk"] ?? false },
+        { key: "recommendedAction", label: "RECOMMENDED ACTION", exp: expected.recommendedAction, act: actual.recommendedAction, matches: fieldMatches?.["recommendedAction"] ?? false },
       ]
     : [];
 
@@ -167,6 +168,39 @@ export default function ReplayEvidencePanel({
             </View>
           </View>
 
+          <View style={styles.detailsDivider} />
+
+          <View style={styles.detailsGrid}>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Hazard ID:</Text>
+              <Text style={styles.detailsValue}>{graphVerify.hazardId}</Text>
+            </View>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Observation ID:</Text>
+              <Text style={styles.detailsValue}>{graphVerify.observationId}</Text>
+            </View>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Nodes Count:</Text>
+              <Text style={styles.detailsValue}>{graphVerify.nodeCount}</Text>
+            </View>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Edges Count:</Text>
+              <Text style={styles.detailsValue}>{graphVerify.edgeCount}</Text>
+            </View>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Warning Count:</Text>
+              <Text style={styles.detailsValue}>{graphVerify.warningCount}</Text>
+            </View>
+            <View style={styles.detailsRow}>
+              <Text style={styles.detailsLabel}>Relationship Types:</Text>
+              <Text style={styles.detailsValue}>
+                {graphVerify.relationshipTypes && graphVerify.relationshipTypes.length > 0
+                  ? graphVerify.relationshipTypes.join(", ")
+                  : "None"}
+              </Text>
+            </View>
+          </View>
+
           <View style={summaryContainerStyle}>
             <MaterialCommunityIcons name={summaryIcon} size={16} color={summaryIconColor} />
             <Text style={summaryTextStyle}>{summaryText}</Text>
@@ -239,7 +273,7 @@ export default function ReplayEvidencePanel({
           ) : expected ? (
             <View style={styles.grid}>
               {fields.map((f) => {
-                const matches = f.exp === f.act;
+                const matches = f.matches;
                 return (
                   <View key={f.key} style={styles.gridItem}>
                     <View style={styles.fieldHeader}>
@@ -532,5 +566,29 @@ const styles = StyleSheet.create({
     fontSize: fonts.size.sm,
     fontFamily: fonts.family,
     fontWeight: "bold",
+  },
+  detailsDivider: {
+    height: 1,
+    backgroundColor: colors.divider,
+    marginVertical: spacing.xs,
+  },
+  detailsGrid: {
+    gap: 4,
+  },
+  detailsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  detailsLabel: {
+    color: colors.onSurfaceTertiary,
+    fontSize: fonts.size.sm - 2,
+    fontFamily: fonts.family,
+  },
+  detailsValue: {
+    color: colors.onSurfaceSecondary,
+    fontSize: fonts.size.sm - 2,
+    fontFamily: fonts.family,
+    fontWeight: "600",
   },
 });
