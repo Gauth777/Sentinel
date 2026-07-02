@@ -34,6 +34,7 @@ from models.demo_replay import (
     DemoReplayReloadResponse,
     DemoReplayResetResponse,
     DemoReplayStatusResponse,
+    DemoReplaySelectResponse,
 )
 from models.vision_inference import ActivationPublicResponse
 from services.demo_replay_service import DemoReplayService
@@ -122,6 +123,15 @@ async def reload(request: Request):
     svc = _get_replay_service(request)
     result = await svc.reload()
     return DemoReplayReloadResponse(**result)
+
+
+@router.post("/samples/{sample_id}/select", response_model=DemoReplaySelectResponse)
+async def select_sample(request: Request, sample_id: str):
+    svc = _get_replay_service(request)
+    result = await svc.select_sample(sample_id)
+    if result is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Sample not found or disabled")
+    return DemoReplaySelectResponse(**result)
 
 
 # ------------------------------------------------------------------ #
@@ -243,5 +253,22 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
             activated=False,
             reason="activation_not_requested",
         ).model_dump(by_alias=True)
+
+    # Compute and attach evidence response
+    from utils.evidence_helper import compute_evidence_data
+    source_map = await svc.get_source_map()
+    source_sample_id = None
+    if source_map:
+        source_sample_id = source_map.get(sample_id)
+    expected_labels = await svc.get_expected_labels(sample_id)
+    evidence_data = compute_evidence_data(
+        sample_id=sample_id,
+        source_sample_id=source_sample_id,
+        expected_labels=expected_labels,
+        actual_prediction=prediction_response,
+        inference_mode=result.inference_mode.value,
+        model=result.model,
+    )
+    response["evidence"] = evidence_data
 
     return response

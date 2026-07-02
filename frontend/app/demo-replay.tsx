@@ -19,10 +19,13 @@ import type {
   DemoReplayStatus,
   DemoReplaySample,
   DemoReplayInferenceResponse,
+  DemoReplayEvidenceResponse,
+  DemoReplayGraphVerifyResponse,
 } from "@/src/types/demoReplay";
 import ReplayImagePair from "@/src/components/replay/ReplayImagePair";
 import ReplayPredictionPanel from "@/src/components/replay/ReplayPredictionPanel";
 import ReplayWarningPanel from "@/src/components/replay/ReplayWarningPanel";
+import ReplayEvidencePanel from "@/src/components/replay/ReplayEvidencePanel";
 
 export default function DemoReplayScreen() {
   const router = useRouter();
@@ -42,6 +45,12 @@ export default function DemoReplayScreen() {
 
   // Inference state
   const [inferenceResult, setInferenceResult] = useState<DemoReplayInferenceResponse | null>(null);
+
+  // Evidence and Graph verify state
+  const [evidenceResult, setEvidenceResult] = useState<DemoReplayEvidenceResponse | null>(null);
+  const [graphVerifyResult, setGraphVerifyResult] = useState<DemoReplayGraphVerifyResponse | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [graphVerifyError, setGraphVerifyError] = useState<string | null>(null);
 
   // Animation values for Advance transition
   const progressAnim = useRef(new Animated.Value(0)).current;
@@ -138,10 +147,53 @@ export default function DemoReplayScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     setInferenceLoading(true);
     setErrorText(null);
+    setEvidenceResult(null);
+    setGraphVerifyResult(null);
+    setEvidenceError(null);
+    setGraphVerifyError(null);
     try {
       const res = await demoReplayApi.infer(currentSample.sampleId, true);
       if (isMounted.current) {
         setInferenceResult(res);
+
+        // Fetch research provenance evidence
+        if (res.evidence) {
+          setEvidenceResult(res.evidence);
+        } else {
+          try {
+            const ev = await demoReplayApi.getEvidence(currentSample.sampleId);
+            if (isMounted.current) {
+              setEvidenceResult(ev);
+            }
+          } catch (evErr: unknown) {
+            console.warn("Failed to load sample evidence:", evErr);
+            if (isMounted.current) {
+              setEvidenceError(getErrorMessage(evErr));
+            }
+          }
+        }
+
+        // Fetch graph verification if activated with hazardId and observationId
+        if (res.activation?.activated) {
+          if (res.activation.hazardId && res.activation.observationId) {
+            try {
+              const gv = await demoReplayApi.getGraphVerification(
+                res.activation.hazardId,
+                res.activation.observationId
+              );
+              if (isMounted.current) {
+                setGraphVerifyResult(gv);
+              }
+            } catch (gvErr: unknown) {
+              console.warn("Failed to verify graph provenance:", gvErr);
+              if (isMounted.current) {
+                setGraphVerifyError(getErrorMessage(gvErr));
+              }
+            }
+          } else {
+            setGraphVerifyError("Missing exact hazard or observation IDs");
+          }
+        }
       }
     } catch (err: unknown) {
       if (isMounted.current) {
@@ -159,6 +211,8 @@ export default function DemoReplayScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setIsAdvancing(true);
     setInferenceResult(null); // Clear previous UI
+    setEvidenceResult(null);
+    setGraphVerifyResult(null);
     setLoopNotification(null);
 
     // 1-1.5s Transition animation
@@ -203,6 +257,8 @@ export default function DemoReplayScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setActionLoading(true);
     setInferenceResult(null);
+    setEvidenceResult(null);
+    setGraphVerifyResult(null);
     setLoopNotification(null);
     try {
       const res = await demoReplayApi.reset();
@@ -219,6 +275,89 @@ export default function DemoReplayScreen() {
     } finally {
       if (isMounted.current) {
         setActionLoading(false);
+      }
+    }
+  };
+
+  const handleJumpToHazardDemo = async () => {
+    if (isAdvancing || actionLoading || inferenceLoading || loading) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    setLoading(true);
+    setInferenceResult(null);
+    setEvidenceResult(null);
+    setGraphVerifyResult(null);
+    setEvidenceError(null);
+    setGraphVerifyError(null);
+    setErrorText(null);
+    setLoopNotification(null);
+
+    try {
+      // 1. Select sample_005 directly using the new endpoint
+      const res = await demoReplayApi.selectSample("sample_005");
+      if (isMounted.current && res) {
+        const targetSample = res.sample;
+        const currentIdx = res.currentIndex;
+
+        setCurrentSample(targetSample);
+        setCurrentIndex(currentIdx);
+        setSampleCount(res.sampleCount);
+
+        // 2. Immediately run inference on it!
+        setInferenceLoading(true);
+        setLoading(false);
+
+        const inferRes = await demoReplayApi.infer(targetSample.sampleId, true);
+        if (isMounted.current) {
+          setInferenceResult(inferRes);
+
+          // Fetch evidence
+          if (inferRes.evidence) {
+            setEvidenceResult(inferRes.evidence);
+          } else {
+            try {
+              const ev = await demoReplayApi.getEvidence(targetSample.sampleId);
+              if (isMounted.current) {
+                setEvidenceResult(ev);
+              }
+            } catch (evErr: unknown) {
+              console.warn("Failed to load sample evidence:", evErr);
+              if (isMounted.current) {
+                setEvidenceError(getErrorMessage(evErr));
+              }
+            }
+          }
+
+          // Fetch graph verification
+          if (inferRes.activation?.activated) {
+            if (inferRes.activation.hazardId && inferRes.activation.observationId) {
+              try {
+                const gv = await demoReplayApi.getGraphVerification(
+                  inferRes.activation.hazardId,
+                  inferRes.activation.observationId
+                );
+                if (isMounted.current) {
+                  setGraphVerifyResult(gv);
+                }
+              } catch (gvErr: unknown) {
+                console.warn("Failed to verify graph provenance:", gvErr);
+                if (isMounted.current) {
+                  setGraphVerifyError(getErrorMessage(gvErr));
+                }
+              }
+            } else {
+              setGraphVerifyError("Missing exact hazard or observation IDs");
+            }
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if (isMounted.current) {
+        setErrorText(getErrorMessage(err));
+      }
+    } finally {
+      if (isMounted.current) {
+        setLoading(false);
+        setInferenceLoading(false);
       }
     }
   };
@@ -354,6 +493,17 @@ export default function DemoReplayScreen() {
         {/* Warning Panel */}
         {inferenceResult && <ReplayWarningPanel inference={inferenceResult} />}
 
+        {/* Evidence Panel */}
+        {inferenceResult && (
+          <ReplayEvidencePanel
+            evidence={evidenceResult}
+            graphVerify={graphVerifyResult}
+            inference={inferenceResult}
+            evidenceError={evidenceError}
+            graphVerifyError={graphVerifyError}
+          />
+        )}
+
         {/* Action Controls */}
         <View style={styles.controlsGrid}>
           <Pressable
@@ -399,6 +549,20 @@ export default function DemoReplayScreen() {
               <Text style={styles.secondaryBtnText}>RESET REPLAY</Text>
             </Pressable>
           </View>
+
+          <Pressable
+            onPress={handleJumpToHazardDemo}
+            disabled={inferenceLoading || isAdvancing || actionLoading || loading}
+            style={({ pressed }) => [
+              styles.hazardDemoBtn,
+              (inferenceLoading || isAdvancing || actionLoading || loading) && styles.disabledBtn,
+              pressed && { opacity: 0.85 },
+            ]}
+            testID="demo-replay-hazard-demo"
+          >
+            <MaterialCommunityIcons name="alert-decagram" size={16} color={colors.warning} />
+            <Text style={styles.hazardDemoBtnText}>JUMP TO HAZARD DEMO (SAMPLE 5)</Text>
+          </Pressable>
 
           <View style={styles.navRow}>
             <Pressable
@@ -758,6 +922,25 @@ const styles = StyleSheet.create({
   navBtnText: {
     color: colors.brand,
     fontSize: fonts.size.sm - 1,
+    fontFamily: fonts.family,
+    fontWeight: "bold",
+    letterSpacing: 0.5,
+  },
+  hazardDemoBtn: {
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+    minHeight: 46,
+  },
+  hazardDemoBtnText: {
+    color: colors.warning,
+    fontSize: fonts.size.sm,
     fontFamily: fonts.family,
     fontWeight: "bold",
     letterSpacing: 0.5,

@@ -42,6 +42,8 @@ class DemoReplayService:
         self._current_index = 0
         self._initialized = False
         self._error: Optional[str] = None
+        self._source_map: Optional[Dict[str, str]] = None
+        self._source_map_loaded = False
 
         raw_dir = scenario_dir or os.environ.get(ENV_SCENARIO_DIR)
         if raw_dir:
@@ -104,6 +106,8 @@ class DemoReplayService:
 
             self._load_manifest_locked()
             self._initialized = True
+            self._source_map = None
+            self._source_map_loaded = False
 
             if self._manifest is not None:
                 self._current_index = 0
@@ -315,6 +319,44 @@ class DemoReplayService:
                     return s
             return None
 
+    # ------------------------------------------------------------------
+    # Evidence helpers
+    # ------------------------------------------------------------------
+
+    async def get_source_map(self) -> Optional[Dict[str, str]]:
+        """Load and cache source_map.example.json. Returns None if not found."""
+        async with self._lock:
+            if self._source_map_loaded:
+                return self._source_map
+            self._source_map_loaded = True
+            source_map_path = self._scenario_dir / "source_map.example.json"
+            if not source_map_path.exists():
+                self._source_map = None
+                return None
+            try:
+                with open(source_map_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._source_map = {str(k): str(v) for k, v in data.items()}
+                else:
+                    self._source_map = None
+            except Exception as e:
+                logger.warning("Failed to load source_map: %s", e)
+                self._source_map = None
+            return self._source_map
+
+    async def get_expected_labels(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Return expected_labels dict for a sample, or None if not found."""
+        async with self._lock:
+            if self._manifest is None:
+                return None
+            for s in self._manifest.enabled_samples():
+                if s.sample_id == sample_id:
+                    if s.expected_labels is None:
+                        return None
+                    return s.expected_labels.model_dump(by_alias=True)
+            return None
+
     def _safe_sample(self, sample: DemoReplaySample) -> Dict[str, Any]:
         """Build a safe API response dict without filesystem paths or expected labels."""
         loc = None
@@ -332,3 +374,60 @@ class DemoReplayService:
             "headingDegrees": sample.heading_degrees,
             "tags": sample.tags,
         }
+
+    async def select_sample(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Select an enabled sample by ID, update current_index, and return details."""
+        async with self._lock:
+            if self._manifest is None:
+                return None
+            enabled = self._manifest.enabled_samples()
+            for idx, s in enumerate(enabled):
+                if s.sample_id == sample_id:
+                    self._current_index = idx
+                    return {
+                        "sample": self._safe_sample(s),
+                        "currentIndex": idx,
+                        "sampleCount": len(enabled),
+                    }
+            return None
+
+    async def get_cached_prediction(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Load, validate and parse cached prediction JSON for a sample."""
+        from models.vision_inference import CachedPredictionFile
+
+        async with self._lock:
+            if self._manifest is None:
+                return None
+            for s in self._manifest.enabled_samples():
+                if s.sample_id == sample_id:
+                    if not s.cached_prediction_path:
+                        return None
+                    path = self._scenario_dir / s.cached_prediction_path
+
+                    # Validate path remains inside scenario directory
+                    try:
+                        path.resolve().relative_to(self._scenario_dir.resolve())
+                    except ValueError:
+                        logger.warning("Cached prediction path traversal blocked for sample %s", sample_id)
+                        return None
+
+                    if not path.exists():
+                        return None
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        # Validate loaded JSON using CachedPredictionFile
+                        cached = CachedPredictionFile(**data)
+                        # Require sample_id to match the requested sample
+                        if cached.sample_id != sample_id:
+                            logger.warning(
+                                "Cached prediction sample_id mismatch: expected %s, got %s",
+                                sample_id, cached.sample_id,
+                            )
+                            return None
+                        # Return the validated model dump
+                        return cached.model_dump(by_alias=True)
+                    except Exception as e:
+                        logger.warning("Failed to load or validate cached prediction: %s", e)
+                        return None
+            return None

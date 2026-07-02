@@ -84,4 +84,41 @@ export type DemoReplayInferenceResponse = {
     warningTextGenerated: boolean;
     warningEventCreated: boolean;
   };
+  evidence?: DemoReplayEvidenceResponse | null;
+};
+
+export type DemoReplayEvidenceResponse = {
+  localSampleId: string;
+  sourceSampleId: string | null;
+  expectedLabels: StructuredRoadPrediction | null;
+  actualPrediction: StructuredRoadPrediction | null;
+  fieldMatches: Record<string, boolean> | null;
+  correctFieldCount: number;
+  totalFieldCount: number;
+  inferenceMode: string;
+  model: string;
+  // compatibility
+  sampleId?: string;
+  sourceMapAvailable?: boolean;
+};
+
+export type DemoReplayGraphVerifyResponse = {
+  graphBackend: "neo4j" | "memory" | "unknown";
+  hazardId: string;
+  observationId: string;
+  exactHazardFound: boolean;
+  exactObservationFound: boolean;
+  exactSupportsRelationshipFound: boolean;
+  nodeCount: number;
+  edgeCount: number;
+  relationshipTypes: string[];
+  warningNodeFound: boolean;
+  warningCount: number;
+  verified: boolean;
+  error?: string | null;
+  // compatibility
+  hazardNodeFound?: boolean;
+  observationNodeFound?: boolean;
+  relationshipFound?: boolean;
+  summary?: string;
 };
