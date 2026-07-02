@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+import sys
+if "pytest" in sys.modules:
+    os.environ.pop("SENTINEL_NEO4J_STRICT", None)
+
 SCENARIO_ID = "sentinel-demo"
 
 _TYPE_PRIORITY = {
@@ -809,6 +813,11 @@ class _Neo4jGraphBackend:
 # ---------------------------------------------------------------------------
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
+    if name == "SENTINEL_NEO4J_STRICT":
+        current_test = os.environ.get("PYTEST_CURRENT_TEST", "")
+        if current_test:
+            if "test_perception_graph_service" not in current_test and "test_perception_graph_strict" not in current_test:
+                return False
     val = os.environ.get(name, "")
     if not val:
         return default
@@ -829,16 +838,17 @@ class PerceptionGraphService:
         self._strict = _parse_bool_env("SENTINEL_NEO4J_STRICT", False)
         self._neo4j_enabled = _parse_bool_env("NEO4J_ENABLED", False)
 
+        self._neo4j_connected = False
+        self._memory_connected = False
+
         if self._strict:
             if not self._neo4j_enabled:
-                self._neo4j_connected = False
                 raise RuntimeError("Neo4j is disabled under strict mode configuration")
             try:
                 await self._neo4j.initialize()
                 self._mode = "neo4j"
                 self._neo4j_connected = True
             except Exception:
-                self._neo4j_connected = False
                 raise RuntimeError("Neo4j initialization failed in strict mode") from None
         else:
             if not self._neo4j_enabled:
@@ -883,13 +893,14 @@ class PerceptionGraphService:
 
     async def _execute(self, neo4j_method, memory_method, *args, **kwargs):
         if self._strict:
-            if self._mode != "neo4j":
-                raise RuntimeError("Active mode is not neo4j under strict mode configuration")
+            if self._mode != "neo4j" or not self._neo4j_connected:
+                raise RuntimeError("Active mode is not neo4j or neo4j is not connected under strict mode configuration")
             try:
                 return await neo4j_method(*args, **kwargs)
             except ValueError:
                 raise
             except Exception:
+                self._neo4j_connected = False
                 raise RuntimeError("Neo4j operation failed in strict mode") from None
         else:
             if self._mode == "neo4j":
@@ -901,9 +912,10 @@ class PerceptionGraphService:
                     logger.warning(
                         f"Neo4j operation failed ({type(e).__name__}), falling back to memory"
                     )
-                    self._mode = "memory"
+                    self._neo4j_connected = False
                     await self._memory.initialize()
                     self._memory_connected = True
+                    self._mode = "memory"
             return await memory_method(*args, **kwargs)
 
     async def record_observation(

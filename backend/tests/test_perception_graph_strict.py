@@ -16,7 +16,7 @@ from services.perception_graph_service import PerceptionGraphService, SCENARIO_I
 def clear_neo4j_env(monkeypatch):
     """Ensure no test can accidentally connect to a real Neo4j instance."""
     for key in list(os.environ.keys()):
-        if key.startswith("NEO4J_"):
+        if key.startswith("NEO4J_") or key == "SENTINEL_NEO4J_STRICT":
             monkeypatch.delenv(key, raising=False)
     yield
 
@@ -110,6 +110,7 @@ async def test_strict_runtime_neo4j_operation_failure(monkeypatch):
         pass
     monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_ok)
     await svc.initialize()
+    assert svc.get_backend_status()["connected"] is True
     
     # Mock operation to fail on Neo4j
     async def mock_neo4j_obs(*args, **kwargs):
@@ -130,6 +131,8 @@ async def test_strict_runtime_neo4j_operation_failure(monkeypatch):
         
     assert not mem_called
     assert svc._mode == "neo4j"  # does not silently become memory
+    assert svc._neo4j_connected is False
+    assert svc.get_backend_status()["connected"] is False
 
 
 @pytest.mark.anyio
@@ -143,6 +146,7 @@ async def test_strict_value_error(monkeypatch):
         pass
     monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_ok)
     await svc.initialize()
+    assert svc.get_backend_status()["connected"] is True
     
     # Mock ValueError on Neo4j operation (e.g. invalid type validation/domain logic)
     async def mock_neo4j_obs(*args, **kwargs):
@@ -162,6 +166,8 @@ async def test_strict_value_error(monkeypatch):
         )
         
     assert not mem_called
+    assert svc._neo4j_connected is True
+    assert svc.get_backend_status()["connected"] is True
 
 
 @pytest.mark.anyio
@@ -226,6 +232,7 @@ async def test_non_strict_runtime_neo4j_failure(monkeypatch):
     monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_ok)
     await svc.initialize()
     assert svc._mode == "neo4j"
+    assert svc._neo4j_connected is True
     
     # Mock Neo4j execution to fail operationally
     async def mock_neo4j_obs(*args, **kwargs):
@@ -252,6 +259,9 @@ async def test_non_strict_runtime_neo4j_failure(monkeypatch):
     assert mem_init_called
     assert mem_obs_called
     assert svc._mode == "memory"
+    assert svc._neo4j_connected is False
+    assert svc._memory_connected is True
+    assert svc.get_backend_status()["connected"] is True
 
 
 @pytest.mark.anyio
@@ -310,3 +320,38 @@ async def test_memory_end_to_end(monkeypatch):
     await svc.reset_demo_data()
     graph2 = await svc.build_graph()
     assert graph2["summary"]["nodeCount"] == 0
+
+
+@pytest.mark.anyio
+async def test_failed_strict_reinitialization_after_memory(monkeypatch):
+    monkeypatch.setenv("SENTINEL_NEO4J_STRICT", "false")
+    monkeypatch.setenv("NEO4J_ENABLED", "false")
+
+    svc = PerceptionGraphService()
+    await svc.initialize()
+    assert svc._mode == "memory"
+    assert svc.get_backend_status()["connected"] is True
+
+    # Reinitialize in strict mode with Neo4j that fails
+    monkeypatch.setenv("SENTINEL_NEO4J_STRICT", "true")
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+
+    async def mock_neo4j_init_fail():
+        raise RuntimeError("connection failed")
+    monkeypatch.setattr(svc._neo4j, "initialize", mock_neo4j_init_fail)
+
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        await svc.initialize()
+
+    status = svc.get_backend_status()
+    assert status["connected"] is False
+    assert status["strict"] is True
+
+
+@pytest.mark.anyio
+async def test_externally_supplied_strict_does_not_leak():
+    # Verify that SENTINEL_NEO4J_STRICT is not present in os.environ,
+    # proving the clear_neo4j_env fixture successfully removed it.
+    assert "SENTINEL_NEO4J_STRICT" not in os.environ
+    svc = PerceptionGraphService()
+    assert svc._strict is False
