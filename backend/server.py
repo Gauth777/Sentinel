@@ -39,7 +39,7 @@ else:
     client = DummyClient()
 
 
-from services.perception_graph_service import PerceptionGraphService
+from services.perception_graph_service import PerceptionGraphService, SCENARIO_ID
 _perception_graph = PerceptionGraphService()
 
 
@@ -448,6 +448,10 @@ async def ensure_seed() -> None:
     for v in SEED_VEHICLES:
         await db.nearby_vehicles.replace_one({"id": v["id"]}, dict(v), upsert=True)
 
+    # Seed the baseline vehicles and hazard into the perception graph
+    await _seed_demo_graph_vehicles()
+    await _seed_demo_graph_hazard()
+
     # Record applied seed version.
     await db.sentinel_meta.replace_one(
         {"id": "seed"},
@@ -470,6 +474,101 @@ async def _seed_demo_graph_vehicles() -> None:
             raise RuntimeError("Demo graph vehicle seeding failed") from None
 
 
+async def _seed_demo_graph_hazard() -> None:
+    import time
+    hz = SEED_HAZARDS[0]
+    
+    existing = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0}) or {}
+    confirmed = int(existing.get("confirmed", hz.get("confirmed", 0)) or 0)
+    reported_incorrect = int(existing.get("reportedIncorrect", hz.get("reportedIncorrect", 0)) or 0)
+
+    lat = hz["location"]["latitude"]
+    lon = hz["location"]["longitude"]
+    observed_seconds_ago = hz["observedSecondsAgo"]
+    current_time = time.time()
+    timestamp = current_time - observed_seconds_ago
+
+    hazard_fields = {
+        "distanceMeters": float(hz["distanceMeters"]),
+        "direction": hz["direction"],
+        "recommendedAction": hz["recommendedAction"],
+        "risk": hz["risk"],
+        "visibilityState": hz["visibilityState"],
+        "sourceType": hz["sourceType"],
+        "routeRelevance": hz["routeRelevance"],
+        "polygon": hz["polygon"],
+        "confirmed": confirmed,
+        "reportedIncorrect": reported_incorrect,
+        "status": "active",
+    }
+
+    try:
+        await _perception_graph.upsert_observation_and_hazard(
+            observation_id="obs-seed-hz-002",
+            vehicle_id="v-3",
+            vehicle_label="Sentinel-F4",
+            hazard_id="hz-002",
+            hazard_type="pothole",
+            hazard_label="Deep Pothole",
+            latitude=lat,
+            longitude=lon,
+            road_segment_id="gst",
+            road_segment_name="GST Road Northbound",
+            timestamp=timestamp,
+            hazard_fields=hazard_fields,
+        )
+
+        # Override confidence for baseline demo hazard
+        if _perception_graph._mode == "neo4j":
+            await _perception_graph._neo4j._run(
+                "MATCH (h:SentinelPerception:Hazard {id: 'hz-002', scenario_id: $scenario_id}) SET h.confidence = $conf",
+                scenario_id=SCENARIO_ID,
+                conf=int(hz.get("confidence", 76))
+            )
+        else:
+            if "hz-002" in _perception_graph._memory._nodes:
+                _perception_graph._memory._nodes["hz-002"]["properties"]["confidence"] = int(hz.get("confidence", 76))
+    except Exception as e:
+        logger.error(f"Demo graph hazard seeding failed: {type(e).__name__}")
+        raise RuntimeError("Demo graph hazard seeding failed") from None
+
+
+def _graph_hazard_to_api(hz: dict, current_time: float) -> dict:
+    updated_at = hz.get("updated_at", 0.0)
+    observed_seconds = max(0, int(current_time - updated_at))
+
+    loc = hz.get("location") or {"latitude": 0.0, "longitude": 0.0}
+    location = {
+        "latitude": float(loc.get("latitude", 0.0)),
+        "longitude": float(loc.get("longitude", 0.0))
+    }
+
+    poly = hz.get("polygon")
+    polygon = None
+    if poly:
+        polygon = [{"latitude": float(p.get("latitude", 0.0)), "longitude": float(p.get("longitude", 0.0))} for p in poly]
+
+    return {
+        "id": hz.get("id", ""),
+        "type": hz.get("type", ""),
+        "label": hz.get("label", ""),
+        "location": location,
+        "polygon": polygon,
+        "distanceMeters": float(hz.get("distanceMeters") if hz.get("distanceMeters") is not None else 0.0),
+        "confidence": int(hz.get("confidence") if hz.get("confidence") is not None else 60),
+        "sources": int(hz.get("sources") if hz.get("sources") is not None else 1),
+        "observedSecondsAgo": observed_seconds,
+        "direction": hz.get("direction") or "Northbound lane",
+        "recommendedAction": hz.get("recommendedAction") or "Move left",
+        "risk": hz.get("risk") or "medium",
+        "visibilityState": hz.get("visibilityState") or "hidden",
+        "sourceType": hz.get("sourceType") or "shared_vehicle",
+        "routeRelevance": hz.get("routeRelevance") or "medium",
+        "confirmed": int(hz.get("confirmed", 0)),
+        "reportedIncorrect": int(hz.get("reportedIncorrect", 0)),
+    }
+
+
 # ======================= App =======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -479,6 +578,7 @@ async def lifespan(app: FastAPI):
 
     await _perception_graph.initialize()
     await _seed_demo_graph_vehicles()
+    await _seed_demo_graph_hazard()
     await _training_samples.initialize()
     await _demo_replay.initialize()
     try:
@@ -534,9 +634,29 @@ async def get_status():
 
 @api_router.get("/sentinel/hazards", response_model=List[Hazard])
 async def list_hazards():
+    import time
     await ensure_seed()
-    docs = await db.hazards.find({}, {"_id": 0}).to_list(100)
-    return [Hazard(**d) for d in docs]
+    try:
+        raw_hazards = await _perception_graph.list_hazards(limit=100)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail="Graph database error")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Unexpected database error")
+
+    current_time = time.time()
+    api_hazards = [_graph_hazard_to_api(h, current_time) for h in raw_hazards]
+
+    # Merge unmigrated counters (confirmed/reportedIncorrect) from Mongo cache.
+    # Community confirmations and incorrect-reports are not yet graph-managed.
+    for hz in api_hazards:
+        mongo_hz = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0, "confirmed": 1, "reportedIncorrect": 1})
+        if mongo_hz:
+            hz["confirmed"] = int(mongo_hz.get("confirmed", 0))
+            hz["reportedIncorrect"] = int(mongo_hz.get("reportedIncorrect", 0))
+
+    return [Hazard(**h) for h in api_hazards]
 
 
 @api_router.get("/sentinel/nearby-vehicles", response_model=List[NearbyVehicle])
@@ -559,8 +679,27 @@ async def get_world_model(
     coordinates it uses real ego telemetry plus a clearly synthetic local road
     context; shared hazards remain stored at absolute coordinates.
     """
+    import time
     await ensure_seed()
-    hazards_docs = await db.hazards.find({}, {"_id": 0}).to_list(100)
+    try:
+        raw_hazards = await _perception_graph.list_hazards(limit=100)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail="Graph database error")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Unexpected database error")
+
+    current_time = time.time()
+    hazards_docs = [_graph_hazard_to_api(h, current_time) for h in raw_hazards]
+
+    # Merge unmigrated counters from Mongo cache
+    for hz in hazards_docs:
+        mongo_hz = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0, "confirmed": 1, "reportedIncorrect": 1})
+        if mongo_hz:
+            hz["confirmed"] = int(mongo_hz.get("confirmed", 0))
+            hz["reportedIncorrect"] = int(mongo_hz.get("reportedIncorrect", 0))
+
     vehicles_docs = await db.nearby_vehicles.find({}, {"_id": 0}).to_list(100)
 
     if (latitude is None) != (longitude is None):
@@ -773,6 +912,7 @@ async def demo_reset():
     try:
         await _perception_graph.reset_demo_data()
         await _seed_demo_graph_vehicles()
+        await _seed_demo_graph_hazard()
     except Exception as e:
         logger.error(f"PerceptionGraphService reset/seeding failed: {type(e).__name__}")
         raise HTTPException(
