@@ -245,27 +245,37 @@ def test_perception_graph_limit_validation(client):
 
 @pytest.mark.anyio
 async def test_perception_graph_non_fatal():
-    """Mock PerceptionGraphService to fail; ensure observation endpoint still works."""
+    """Failure in upsert_observation_and_hazard must fail the request, not be rescued by Mongo, and not write to Mongo."""
     from unittest.mock import patch, AsyncMock
     from fastapi.testclient import TestClient
-    from server import app
+    from server import app, db
 
-    with patch("server._perception_graph.record_observation", new=AsyncMock(side_effect=RuntimeError("graph down"))):
-        with patch("server._perception_graph.record_warning", new=AsyncMock(side_effect=RuntimeError("graph down"))):
-            with TestClient(app) as c:
-                c.post("/api/sentinel/demo/reset")
-                obs = {
-                    "id": "obs-integ-007",
-                    "type": "pothole",
-                    "label": "Pothole Ahead",
-                    "location": {"latitude": 12.9450, "longitude": 80.1503},
-                    "polygon": None,
-                    "sourceVehicleId": "v-1",
-                    "vehicleLabel": "Sentinel-A8",
-                }
-                r = c.post("/api/sentinel/demo/observation", json=obs)
-                assert r.status_code == 200
-                assert r.json()["type"] == "pothole"
+    # Clear Mongo db.hazards and db.observations
+    await db.hazards.delete_many({})
+    await db.observations.delete_many({})
+
+    # Mock upsert_observation_and_hazard to raise RuntimeError
+    mock_upsert = AsyncMock(side_effect=RuntimeError("graph down"))
+    with patch("server._perception_graph.upsert_observation_and_hazard", new=mock_upsert):
+        with TestClient(app, raise_server_exceptions=False) as c:
+            obs = {
+                "id": "obs-integ-007",
+                "type": "pothole",
+                "label": "Pothole Ahead",
+                "location": {"latitude": 12.9450, "longitude": 80.1503},
+                "polygon": None,
+                "sourceVehicleId": "v-1",
+                "vehicleLabel": "Sentinel-A8",
+            }
+            r = c.post("/api/sentinel/demo/observation", json=obs)
+            # Verify request failed (not code 200)
+            assert r.status_code != 200
+
+            # Verify no Mongo hazard or observation write occurs
+            h_count = await db.hazards.count_documents({})
+            o_count = await db.observations.count_documents({})
+            assert h_count == 0
+            assert o_count == 0
 
 
 # ---------------------------------------------------------------------------

@@ -610,3 +610,238 @@ async def test_25_replay_activation_contracts():
     assert activation.activated is True
     assert activation.warning_text_generated is True
     assert activation.warning_event_created is False
+
+
+# ---------------------------------------------------------------------------
+# Stage B1 review blockers regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_replay_metadata_validation(graph_service):
+    runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    
+    # None is allowed
+    obs_none = {
+        "id": "obs-meta-1",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": None
+    }
+    await runner.process_observation(obs_none)  # Should succeed
+
+    # Non-dict raises ValueError
+    obs_invalid_type = {
+        "id": "obs-meta-2",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": "not-a-dict"
+    }
+    with pytest.raises(ValueError, match="_replay_meta must be a dictionary or None"):
+        await runner.process_observation(obs_invalid_type)
+
+    # Empty string in string fields raises ValueError
+    obs_empty_str = {
+        "id": "obs-meta-3",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": {"model": ""}
+    }
+    with pytest.raises(ValueError, match="Replay metadata model must be a non-empty string"):
+        await runner.process_observation(obs_empty_str)
+
+    # Invalid risk raises ValueError
+    obs_invalid_risk = {
+        "id": "obs-meta-4",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": {"risk": "extreme"}
+    }
+    with pytest.raises(ValueError, match="Replay metadata risk must be 'low', 'medium', or 'high'"):
+        await runner.process_observation(obs_invalid_risk)
+
+    # Boolean confidence raises ValueError
+    obs_bool_conf = {
+        "id": "obs-meta-5",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": {"confidence": True}
+    }
+    with pytest.raises(ValueError, match="Replay metadata confidence must be a finite number"):
+        await runner.process_observation(obs_bool_conf)
+
+    # Non-finite float confidence raises ValueError
+    obs_inf_conf = {
+        "id": "obs-meta-6",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "_replay_meta": {"confidence": float("inf")}
+    }
+    with pytest.raises(ValueError, match="Replay metadata confidence must be a finite number"):
+        await runner.process_observation(obs_inf_conf)
+
+    # Duplicate observation does not bypass this validation
+    obs_dup = {
+        "id": "obs-meta-7",
+        "type": "pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+    }
+    await runner.process_observation(obs_dup)
+    
+    # Process duplicate but pass invalid metadata
+    obs_dup_invalid = dict(obs_dup)
+    obs_dup_invalid["_replay_meta"] = {"model": ""}
+    with pytest.raises(ValueError, match="Replay metadata model must be a non-empty string"):
+        await runner.process_observation(obs_dup_invalid)
+
+
+@pytest.mark.anyio
+async def test_preserve_matched_hazard_label(graph_service):
+    runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    
+    # Process first observation with custom label
+    obs1 = {
+        "id": "obs-label-1",
+        "type": "pothole",
+        "label": "Deep Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+    }
+    res1 = await runner.process_observation(obs1)
+    assert res1["label"] == "Deep Pothole"
+
+    # Process second nearby observation with a different label
+    obs2 = {
+        "id": "obs-label-2",
+        "type": "pothole",
+        "label": "Minor Pothole",
+        "location": {"latitude": 12.9451, "longitude": 80.1504},
+    }
+    res2 = await runner.process_observation(obs2)
+    
+    # The hazard ID is the same (matched)
+    assert res1["id"] == res2["id"]
+    
+    # The label should still be "Deep Pothole", NOT overwritten by "Minor Pothole"
+    assert res2["label"] == "Deep Pothole"
+
+
+@pytest.mark.anyio
+async def test_legacy_read_cache_handling():
+    from server import _cache_graph_hazard_for_legacy_reads, db
+    
+    # Clear collection
+    await db.hazards.delete_many({})
+    await db.observations.delete_many({})
+
+    # Mock hazard output
+    hazard_data = {
+        "id": "hz-cache-1",
+        "type": "pothole",
+        "label": "Deep Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "polygon": [{"latitude": 12.9451, "longitude": 80.1504}],
+        "distanceMeters": 120.5,
+        "confidence": 80,
+        "sources": 2,
+        "observedSecondsAgo": 5,
+        "direction": "Northbound lane",
+        "recommendedAction": "Move left",
+        "risk": "medium",
+        "visibilityState": "visible",
+        "sourceType": "shared_vehicle",
+        "routeRelevance": "high",
+        "confirmed": 1,
+        "reportedIncorrect": 0,
+        "status": "active",
+        "segment_id": "gst",
+        "warnings": ["Warning Text"],
+        "_warning_events": [{"event": "evt"}],
+        "source_vehicles": ["v-1", "v-2"]
+    }
+
+    # Run caching helper
+    await _cache_graph_hazard_for_legacy_reads(hazard_data)
+
+    # Verify db.observations is never written
+    obs_count = await db.observations.count_documents({})
+    assert obs_count == 0
+
+    # Verify db.hazards contains expected cached record
+    cached = await db.hazards.find_one({"id": "hz-cache-1"}, {"_id": 0})
+    assert cached is not None
+    assert cached["id"] == "hz-cache-1"
+    assert cached["type"] == "pothole"
+    assert cached["label"] == "Deep Pothole"
+    
+    # Verify response-only warning content/warnings/events are not cached
+    assert "warnings" not in cached
+    assert "_warning_events" not in cached
+    
+    # Verify source_vehicles is not cached
+    assert "source_vehicles" not in cached
+
+    # Verify cache failure does not propagate and throw error
+    # Let's mock db.hazards class replace_one to raise Exception
+    hazards_class = db.hazards.__class__
+    original_replace = hazards_class.replace_one
+    async def mock_replace(self_coll, *args, **kwargs):
+        if getattr(self_coll, "name", None) == "hazards":
+            raise RuntimeError("db connection lost")
+        return await original_replace(self_coll, *args, **kwargs)
+    hazards_class.replace_one = mock_replace
+    try:
+        # Calling cache should fail silently and not raise error
+        await _cache_graph_hazard_for_legacy_reads(hazard_data)
+    finally:
+        hazards_class.replace_one = original_replace
+
+
+@pytest.mark.anyio
+async def test_legacy_read_cache_failure_does_not_rollback_graph():
+    from fastapi.testclient import TestClient
+    from server import app, db, _perception_graph
+    
+    # Reset
+    await db.hazards.delete_many({})
+    await db.observations.delete_many({})
+    await _perception_graph.reset_demo_data()
+
+    obs = {
+        "id": "obs-cache-fail-1",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-1",
+        "vehicleLabel": "Sentinel Vehicle"
+    }
+
+    # Mock db.hazards class replace_one to fail
+    hazards_class = db.hazards.__class__
+    original_replace = hazards_class.replace_one
+    async def mock_replace(self_coll, *args, **kwargs):
+        if getattr(self_coll, "name", None) == "hazards":
+            raise RuntimeError("DB connection error")
+        return await original_replace(self_coll, *args, **kwargs)
+    hazards_class.replace_one = mock_replace
+
+    try:
+        with TestClient(app) as c:
+            r = c.post("/api/sentinel/demo/observation", json=obs)
+            assert r.status_code == 200
+            res = r.json()
+            assert res["id"] is not None
+            
+            # Verify graph hazard is present
+            graph_hz = await _perception_graph.get_observation_hazard("obs-cache-fail-1")
+            assert graph_hz is not None
+            assert graph_hz["id"] == res["id"]
+            
+            # Verify Mongo hazard is NOT present (because cache write failed)
+            mongo_hz = await db.hazards.find_one({"id": res["id"]})
+            assert mongo_hz is None
+            
+            # Verify db.observations is not written
+            obs_count = await db.observations.count_documents({})
+            assert obs_count == 0
+    finally:
+        hazards_class.replace_one = original_replace
+

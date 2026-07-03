@@ -620,7 +620,7 @@ async def test_neo4j_upsert_managed_tx(monkeypatch):
 
     # 1. First mock results for a non-existing obs and non-existing hazard
     mock_driver.result_queue.append([{"exists": False, "vehicle_ids": [], "hazard_ids": [], "road_ids": []}]) # obs exists
-    mock_driver.result_queue.append([{"exists": False, "hazard_node": None, "road_id": None}]) # hazard exists
+    mock_driver.result_queue.append([{"hazard_node": None, "road_ids": []}]) # hazard exists
     mock_driver.result_queue.append([]) # merge V
     mock_driver.result_queue.append([]) # merge R
     mock_driver.result_queue.append([]) # create H
@@ -672,7 +672,7 @@ async def test_neo4j_validation_failure_rolls_back(monkeypatch):
 
     # Mock existing hazard with risk high (new observation)
     mock_driver.result_queue.append([{"exists": False, "vehicle_id": None, "hazard_id": None}]) # obs does not exist
-    mock_driver.result_queue.append([{"exists": True, "hazard_node": {"id": "hz-1", "type": "pothole", "risk": "high"}, "road_id": "road-1"}]) # hazard exists
+    mock_driver.result_queue.append([{"hazard_node": {"id": "hz-1", "type": "pothole", "risk": "high"}, "road_ids": ["road-1"]}]) # hazard exists
 
     # Try upserting with lower risk
     with pytest.raises(ValueError, match="Cannot decrease risk level"):
@@ -1349,4 +1349,96 @@ async def test_memory_update_hazard_stats_ignores_cross_scenario():
     props = svc._memory._nodes["hz-1"]["properties"]
     assert props["sourceCount"] == 1
     assert props["confidence"] == 60
+
+
+@pytest.mark.anyio
+async def test_scoping_gap_checks():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+    
+    # 1. Multiple valid roads rejected
+    svc._memory._merge_node_sync("hz-test", "Hazard", "Test Hazard", {"type": "pothole", "latitude": 12.9450, "longitude": 80.1503, "status": "active"})
+    svc._memory._merge_node_sync("gst", "RoadSegment", "GST", {})
+    svc._memory._merge_node_sync("side", "RoadSegment", "Side", {})
+    svc._memory._merge_edge_sync("ON_ROAD:hz-test:gst", "ON_ROAD", "hz-test", "gst", {})
+    svc._memory._merge_edge_sync("ON_ROAD:hz-test:side", "ON_ROAD", "hz-test", "side", {})
+    
+    with pytest.raises(ValueError, match="must have exactly one scenario-scoped ON_ROAD relationship"):
+        await svc.upsert_observation_and_hazard(
+            observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+            hazard_id="hz-test", hazard_type="pothole", hazard_label="P1",
+            latitude=12.9450, longitude=80.1503, road_segment_id="gst",
+            road_segment_name="GST", timestamp=1000.0
+        )
+
+    # 2. Cross-scenario ON_ROAD edge ignored
+    svc2 = PerceptionGraphService()
+    await svc2.initialize()
+    svc2._memory._merge_node_sync("hz-test", "Hazard", "Test Hazard", {"type": "pothole", "latitude": 12.9450, "longitude": 80.1503, "status": "active"})
+    svc2._memory._merge_node_sync("gst", "RoadSegment", "GST", {})
+    svc2._memory._merge_edge_sync("ON_ROAD:hz-test:gst", "ON_ROAD", "hz-test", "gst", {})
+    svc2._memory._merge_edge_sync("ON_ROAD:hz-test:other", "ON_ROAD", "hz-test", "gst", {})
+    svc2._memory._edges["ON_ROAD:hz-test:other"]["scenarioId"] = "other-scenario"
+    
+    await svc2.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-test", hazard_type="pothole", hazard_label="P1",
+        latitude=12.9450, longitude=80.1503, road_segment_id="gst",
+        road_segment_name="GST", timestamp=1000.0
+    )
+
+    # 3. Wrong-type road target ignored
+    svc3 = PerceptionGraphService()
+    await svc3.initialize()
+    svc3._memory._merge_node_sync("hz-test", "Hazard", "Test Hazard", {"type": "pothole", "latitude": 12.9450, "longitude": 80.1503, "status": "active"})
+    svc3._memory._merge_node_sync("gst", "RoadSegment", "GST", {})
+    svc3._memory._merge_node_sync("v-wrong", "Vehicle", "Wrong Node", {})
+    svc3._memory._merge_edge_sync("ON_ROAD:hz-test:gst", "ON_ROAD", "hz-test", "gst", {})
+    svc3._memory._merge_edge_sync("ON_ROAD:hz-test:v-wrong", "ON_ROAD", "hz-test", "v-wrong", {})
+    
+    await svc3.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-test", hazard_type="pothole", hazard_label="P1",
+        latitude=12.9450, longitude=80.1503, road_segment_id="gst",
+        road_segment_name="GST", timestamp=1000.0
+    )
+
+    # 4. Cross-scenario RoadSegment ignored
+    svc4 = PerceptionGraphService()
+    await svc4.initialize()
+    svc4._memory._merge_node_sync("hz-test", "Hazard", "Test Hazard", {"type": "pothole", "latitude": 12.9450, "longitude": 80.1503, "status": "active"})
+    svc4._memory._merge_node_sync("gst", "RoadSegment", "GST", {})
+    svc4._memory._merge_node_sync("cross-road", "RoadSegment", "Cross Road", {})
+    svc4._memory._nodes["cross-road"]["scenarioId"] = "other-scenario"
+    svc4._memory._merge_edge_sync("ON_ROAD:hz-test:gst", "ON_ROAD", "hz-test", "gst", {})
+    svc4._memory._merge_edge_sync("ON_ROAD:hz-test:cross", "ON_ROAD", "hz-test", "cross-road", {})
+    
+    await svc4.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-test", hazard_type="pothole", hazard_label="P1",
+        latitude=12.9450, longitude=80.1503, road_segment_id="gst",
+        road_segment_name="GST", timestamp=1000.0
+    )
+
+    # 5. One valid road plus malformed foreign edges succeeds
+    svcf = PerceptionGraphService()
+    await svcf.initialize()
+    svcf._memory._merge_node_sync("hz-test", "Hazard", "Test Hazard", {"type": "pothole", "latitude": 12.9450, "longitude": 80.1503, "status": "active"})
+    svcf._memory._merge_node_sync("gst", "RoadSegment", "GST", {})
+    svcf._memory._merge_node_sync("cross-road", "RoadSegment", "Cross Road", {})
+    svcf._memory._nodes["cross-road"]["scenarioId"] = "other-scenario"
+    svcf._memory._merge_node_sync("v-wrong", "Vehicle", "Wrong Node", {})
+    
+    svcf._memory._merge_edge_sync("ON_ROAD:hz-test:gst", "ON_ROAD", "hz-test", "gst", {})
+    svcf._memory._merge_edge_sync("ON_ROAD:hz-test:cross", "ON_ROAD", "hz-test", "cross-road", {})
+    svcf._memory._merge_edge_sync("ON_ROAD:hz-test:v-wrong", "ON_ROAD", "hz-test", "v-wrong", {})
+    svcf._memory._merge_edge_sync("ON_ROAD:hz-test:other-edge", "ON_ROAD", "hz-test", "gst", {})
+    svcf._memory._edges["ON_ROAD:hz-test:other-edge"]["scenarioId"] = "other-scenario"
+    
+    await svcf.upsert_observation_and_hazard(
+        observation_id="obs-1", vehicle_id="v-1", vehicle_label="V1",
+        hazard_id="hz-test", hazard_type="pothole", hazard_label="P1",
+        latitude=12.9450, longitude=80.1503, road_segment_id="gst",
+        road_segment_name="GST", timestamp=1000.0
+    )
 
