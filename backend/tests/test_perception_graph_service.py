@@ -249,6 +249,17 @@ async def test_one_source_provenance_chain():
         road_segment_name="GST Road",
         timestamp=1000.0,
     )
+    await svc.record_observation(
+        observation_id="obs-2",
+        vehicle_id="v-B",
+        vehicle_label="Vehicle B",
+        hazard_id="hz-2",
+        hazard_type="pothole",
+        hazard_label="Deep Pothole",
+        road_segment_id="seg-gst",
+        road_segment_name="GST Road",
+        timestamp=1500.0,
+    )
     await svc.record_warning(
         warning_id="wrn-1",
         hazard_id="hz-1",
@@ -395,7 +406,7 @@ async def test_complete_warning_chain():
         "obs-2", "v-B", "Vehicle B", "hz-1", "pothole", "Pothole", "seg-gst", "GST", 2000.0
     )
     await svc.record_warning(
-        "wrn-1", "hz-1", "v-C", "Pothole ahead", "en", "seg-gst", 3000.0
+        "wrn-1", "hz-1", "v-B", "Pothole ahead", "en", "seg-gst", 3000.0
     )
     graph = await svc.build_graph(hazard_id="hz-1")
     assert graph["summary"]["focus"]["sourceCount"] == 2
