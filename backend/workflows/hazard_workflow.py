@@ -1,10 +1,9 @@
-import os
-import math
-import uuid
-import time
+import hashlib
 import logging
-from typing import Dict, List, Optional
-from services.neo4j_service import Neo4jService
+import math
+import time
+from typing import Optional, List
+
 from services.warning_service import WarningService
 from utils.geo import haversine_meters
 
@@ -13,11 +12,140 @@ logger = logging.getLogger(__name__)
 # Workflow Settings
 MATCH_RADIUS_METERS = 50.0
 MATCH_WINDOW_SECONDS = 600  # 10 minutes
-EXPIRY_SECONDS = 3600       # 1 hour
+
+ROADS = [
+    {
+        "id": "gst",
+        "name": "GST Road Northbound",
+        "coords": [
+            {"latitude": 12.9436, "longitude": 80.1502},
+            {"latitude": 12.9474, "longitude": 80.1511},
+        ],
+    },
+    {
+        "id": "side",
+        "name": "Velachery Link Rd",
+        "coords": [
+            {"latitude": 12.9441, "longitude": 80.1356},
+            {"latitude": 12.9441, "longitude": 80.1664},
+        ],
+    },
+    {
+        "id": "service",
+        "name": "Service Rd",
+        "coords": [
+            {"latitude": 12.9429, "longitude": 80.1574},
+            {"latitude": 12.9465, "longitude": 80.1580},
+        ],
+    },
+]
+
+RISK_RANK = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+}
+
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculates distance in metres between two coordinates."""
     return haversine_meters(lat1, lon1, lat2, lon2)
+
+
+def resolve_road_segment(lat: float, lon: float) -> tuple[str, str]:
+    """Resolves road segment ID and name based on closest centerline point."""
+    best_road_id = "gst"
+    best_road_name = "GST Road Northbound"
+    min_dist = float("inf")
+    for road in ROADS:
+        for coord in road["coords"]:
+            dist = calculate_distance(lat, lon, coord["latitude"], coord["longitude"])
+            if dist < min_dist:
+                min_dist = dist
+                best_road_id = road["id"]
+                best_road_name = road["name"]
+    return best_road_id, best_road_name
+
+
+def generate_deterministic_hazard_id(observation_id: str) -> str:
+    """Generates deterministic hazard ID from observation ID."""
+    hash_object = hashlib.sha256(observation_id.encode("utf-8"))
+    hex_digest = hash_object.hexdigest()
+    return f"hz-{hex_digest[:12]}"
+
+
+def generate_deterministic_warning_id(hazard_id: str, observation_id: str, vehicle_id: str, language: str) -> str:
+    """Generates a deterministic and stable warning ID."""
+    return f"warn-{hazard_id}-{observation_id}-{vehicle_id}-{language}"
+
+
+async def _record_warning_events(
+    graph_service,
+    hazard_id: str,
+    obs_id: str,
+    source_vehicle_id: str,
+    road_segment_id: Optional[str],
+    warnings: dict,
+    current_time: float,
+) -> List[str]:
+    warning_ids = []
+
+    # 1. Attempt the existing local source warning
+    source_warning_id = generate_deterministic_warning_id(
+        hazard_id=hazard_id,
+        observation_id=obs_id,
+        vehicle_id=source_vehicle_id,
+        language="en"
+    )
+    try:
+        await graph_service.record_warning(
+            warning_id=source_warning_id,
+            hazard_id=hazard_id,
+            vehicle_id=source_vehicle_id,
+            warning_text=warnings["en"],
+            language="en",
+            road_segment_id=road_segment_id,
+            timestamp=current_time
+        )
+        warning_ids.append(source_warning_id)
+    except Exception as e:
+        logger.warning("Failed to record source warning event: %s", type(e).__name__)
+
+    # 2. Call get_warning_recipient_vehicle_ids
+    peer_vehicle_ids = []
+    try:
+        peer_vehicle_ids = await graph_service.get_warning_recipient_vehicle_ids(
+            hazard_id=hazard_id,
+            source_vehicle_id=source_vehicle_id
+        )
+    except Exception as e:
+        logger.warning("Failed to look up peer warning recipients: %s", type(e).__name__)
+
+    # 3. For each returned peer ID, record one warning
+    for peer_id in peer_vehicle_ids:
+        if peer_id == source_vehicle_id:
+            continue
+        peer_warning_id = generate_deterministic_warning_id(
+            hazard_id=hazard_id,
+            observation_id=obs_id,
+            vehicle_id=peer_id,
+            language="en"
+        )
+        try:
+            await graph_service.record_warning(
+                warning_id=peer_warning_id,
+                hazard_id=hazard_id,
+                vehicle_id=peer_id,
+                warning_text=warnings["en"],
+                language="en",
+                road_segment_id=road_segment_id,
+                timestamp=current_time
+            )
+            warning_ids.append(peer_warning_id)
+        except Exception as e:
+            logger.warning("Failed to record peer warning event for %s: %s", peer_id, type(e).__name__)
+
+    return warning_ids
 
 
 class WorkflowRunner:
@@ -26,337 +154,305 @@ class WorkflowRunner:
 
 
 class LocalWorkflowRunner(WorkflowRunner):
-    def __init__(self):
-        pass
+    def __init__(self, graph_service=None, ego_location=None):
+        self.graph_service = graph_service
+        self.ego_location = ego_location
 
     async def process_observation(self, obs: dict) -> dict:
-        """Processes a new raw observation idempotently.
-        
-        Returns the resulting hazard details.
-        """
-        from server import db, EGO
+        """Processes a new raw observation graph-authoritatively and idempotently."""
+        # 1. Lazy dependency resolution
+        graph_service = self.graph_service
+        if graph_service is None:
+            from server import _perception_graph
+            graph_service = _perception_graph
 
-        # 1. Idempotency Check
+        ego_location = self.ego_location
+        if ego_location is None:
+            from server import EGO
+            ego_location = EGO
+
+        # 2. Strict Input Validation
+        if not isinstance(obs, dict):
+            raise ValueError("Observation must be a dictionary.")
+
         obs_id = obs.get("id")
-        if not obs_id:
-            raise ValueError("Observation must have a unique ID.")
+        if not obs_id or not isinstance(obs_id, str) or not obs_id.strip():
+            raise ValueError("Observation id must be a non-empty string.")
 
-        existing_obs = await db.observations.find_one({"id": obs_id})
-        if existing_obs:
-            # Already processed! Return the associated hazard.
-            hazard_id = existing_obs["hazard_id"]
-            existing_hz = await db.hazards.find_one({"id": hazard_id}, {"_id": 0})
-            return existing_hz
-
-        # 2. Validation
         obs_type = obs.get("type")
+        if not obs_type or not isinstance(obs_type, str) or not obs_type.strip():
+            raise ValueError("Observation type must be a non-empty string.")
+
+        label = obs.get("label")
+        if label is None:
+            label = obs_type.replace("_", " ").title()
+        if not label or not isinstance(label, str) or not label.strip():
+            raise ValueError("Observation label must resolve to a non-empty string.")
+
+        source_vehicle_id = obs.get("sourceVehicleId")
+        if source_vehicle_id is None:
+            source_vehicle_id = "v-unknown"
+        if not source_vehicle_id or not isinstance(source_vehicle_id, str) or not source_vehicle_id.strip():
+            raise ValueError("Observation sourceVehicleId must resolve to a non-empty string.")
+
+        vehicle_label = obs.get("vehicleLabel")
+        if vehicle_label is None:
+            vehicle_label = "Sentinel Vehicle"
+        if not vehicle_label or not isinstance(vehicle_label, str) or not vehicle_label.strip():
+            raise ValueError("Observation vehicleLabel must resolve to a non-empty string.")
+
         location = obs.get("location")
-        source_vehicle_id = obs.get("sourceVehicleId", "v-unknown")
-        vehicle_label = obs.get("vehicleLabel", "Sentinel Vehicle")
-        
-        if not obs_type or not location:
-            raise ValueError("Observation must contain type and location.")
+        if not isinstance(location, dict):
+            raise ValueError("Observation location must be a dictionary.")
 
         lat = location.get("latitude")
         lon = location.get("longitude")
-        if lat is None or lon is None:
-            raise ValueError("Location must contain latitude and longitude.")
 
-        # 3. Resolve Road Segment
-        # Find nearest road segment among GST, Side, Service
-        roads = [
-            {"id": "gst", "name": "GST Road Northbound", "coords": [
-                {"latitude": 12.9436, "longitude": 80.1502},  # approximate centerline points
-                {"latitude": 12.9474, "longitude": 80.1511}
-            ]},
-            {"id": "side", "name": "Velachery Link Rd", "coords": [
-                {"latitude": 12.9441, "longitude": 80.1356},
-                {"latitude": 12.9441, "longitude": 80.1664}
-            ]},
-            {"id": "service", "name": "Service Rd", "coords": [
-                {"latitude": 12.9429, "longitude": 80.1574},
-                {"latitude": 12.9465, "longitude": 80.1580}
-            ]}
-        ]
-        
-        # Simple closest-point-to-centerline resolver
-        best_road_id = "gst"
-        min_dist = 999999.0
-        for road in roads:
-            for coord in road["coords"]:
-                dist = calculate_distance(lat, lon, coord["latitude"], coord["longitude"])
-                if dist < min_dist:
-                    min_dist = dist
-                    best_road_id = road["id"]
+        if lat is None or isinstance(lat, bool) or not isinstance(lat, (int, float)):
+            raise ValueError("Location latitude must be a finite number.")
+        if not math.isfinite(lat) or lat < -90.0 or lat > 90.0:
+            raise ValueError("Location latitude must be between -90 and 90.")
 
-        # 4. Find Similar Active Hazard
-        matched_hazard = None
-        hazards = await db.hazards.find({"status": "active"}).to_list(100)
-        
+        if lon is None or isinstance(lon, bool) or not isinstance(lon, (int, float)):
+            raise ValueError("Location longitude must be a finite number.")
+        if not math.isfinite(lon) or lon < -180.0 or lon > 180.0:
+            raise ValueError("Location longitude must be between -180 and 180.")
+
+        polygon = obs.get("polygon")
+        if polygon is not None:
+            if not isinstance(polygon, list):
+                raise ValueError("Polygon must be a list.")
+            for pt in polygon:
+                if not isinstance(pt, dict) or "latitude" not in pt or "longitude" not in pt:
+                    raise ValueError("Polygon points must contain latitude and longitude.")
+                p_lat = pt.get("latitude")
+                p_lon = pt.get("longitude")
+                if p_lat is None or isinstance(p_lat, bool) or not isinstance(p_lat, (int, float)) or not math.isfinite(p_lat) or p_lat < -90.0 or p_lat > 90.0:
+                    raise ValueError("Polygon point latitude must be a finite number between -90 and 90.")
+                if p_lon is None or isinstance(p_lon, bool) or not isinstance(p_lon, (int, float)) or not math.isfinite(p_lon) or p_lon < -180.0 or p_lon > 180.0:
+                    raise ValueError("Polygon point longitude must be a finite number between -180 and 180.")
+
+        # 3. Validate _replay_meta before any graph call
+        replay_meta = obs.get("_replay_meta")
+        if replay_meta is not None:
+            if not isinstance(replay_meta, dict):
+                raise ValueError("_replay_meta must be a dictionary or None.")
+
+            # String fields when present and non-None
+            str_fields = ["recommendedAction", "model", "inferenceMode", "sampleId", "lastInferenceId"]
+            for field in str_fields:
+                if field in replay_meta:
+                    val = replay_meta[field]
+                    if val is not None:
+                        if not isinstance(val, str) or not val.strip():
+                            raise ValueError(f"Replay metadata {field} must be a non-empty string.")
+
+            # risk when present and non-None
+            if "risk" in replay_meta:
+                risk_val = replay_meta["risk"]
+                if risk_val is not None:
+                    if risk_val not in ("low", "medium", "high"):
+                        raise ValueError("Replay metadata risk must be 'low', 'medium', or 'high'.")
+
+            # confidence when present and non-None
+            if "confidence" in replay_meta:
+                conf_val = replay_meta["confidence"]
+                if conf_val is not None:
+                    if isinstance(conf_val, bool) or not isinstance(conf_val, (int, float)) or not math.isfinite(conf_val):
+                        raise ValueError("Replay metadata confidence must be a finite number.")
+
+        # 4. Idempotency Check via PerceptionGraphService
+        existing_hz = await graph_service.get_observation_hazard(obs_id)
         current_time = time.time()
-        
-        for hz in hazards:
-            if hz["type"] == obs_type:
-                # Check segment
-                hz_segment = hz.get("segment_id", "gst")
-                if hz_segment == best_road_id:
-                    # Check distance
-                    hz_lat = hz["location"]["latitude"]
-                    hz_lon = hz["location"]["longitude"]
-                    dist = calculate_distance(lat, lon, hz_lat, hz_lon)
-                    if dist <= MATCH_RADIUS_METERS:
-                        # Check match window (last updated or created within match window)
-                        last_updated = hz.get("updated_at", hz.get("created_at", current_time))
-                        if (current_time - last_updated) <= MATCH_WINDOW_SECONDS:
-                            matched_hazard = hz
-                            break
+        if existing_hz:
+            hz_copy = dict(existing_hz)
+            updated_at = hz_copy.get("updated_at") or current_time
+            observed_seconds_ago = max(0, int(current_time - updated_at))
+            hz_copy["observedSecondsAgo"] = observed_seconds_ago
 
-        # 5. Create/Update Hazard & Recalculate Confidence
-        hazard_id = None
-        is_new = False
+            distance_to_ego = hz_copy.get("distanceMeters")
+            if distance_to_ego is None:
+                hz_lat = hz_copy["location"]["latitude"]
+                hz_lon = hz_copy["location"]["longitude"]
+                distance_to_ego = calculate_distance(hz_lat, hz_lon, ego_location["latitude"], ego_location["longitude"])
 
-        # Replay provenance metadata (used in both match and create branches)
+            warnings = WarningService.generate_warning_texts(
+                hz_copy["type"],
+                int(distance_to_ego),
+                hz_copy.get("recommendedAction", "Exercise caution")
+            )
+            hz_copy["warnings"] = warnings
+
+            # Record warning events
+            hz_copy["_warning_events"] = await _record_warning_events(
+                graph_service=graph_service,
+                hazard_id=hz_copy["id"],
+                obs_id=obs_id,
+                source_vehicle_id=source_vehicle_id,
+                road_segment_id=hz_copy.get("segment_id"),
+                warnings=warnings,
+                current_time=current_time
+            )
+
+            return hz_copy
+
+        # 4. Resolve Road Segment
+        road_segment_id, road_segment_name = resolve_road_segment(lat, lon)
+
+        # 5. Similar Active Hazard Lookup
+        matched_hazard = None
+        match_result = await graph_service.find_similar_active_hazard(
+            hazard_type=obs_type,
+            latitude=lat,
+            longitude=lon,
+            road_segment_id=road_segment_id,
+            radius_m=MATCH_RADIUS_METERS,
+            min_updated_at=current_time - MATCH_WINDOW_SECONDS,
+        )
+        if match_result:
+            matched_hazard = match_result["hazard"]
+
+        # 6. Selected Hazard ID
+        if matched_hazard:
+            selected_hazard_id = matched_hazard["id"]
+        else:
+            selected_hazard_id = generate_deterministic_hazard_id(obs_id)
+
+        # 7. Hazard Field Construction
+        if matched_hazard:
+            hz_lat = matched_hazard["location"]["latitude"]
+            hz_lon = matched_hazard["location"]["longitude"]
+            distance_to_ego = calculate_distance(hz_lat, hz_lon, ego_location["latitude"], ego_location["longitude"])
+        else:
+            distance_to_ego = calculate_distance(lat, lon, ego_location["latitude"], ego_location["longitude"])
+
+        if obs_type == "stationary_vehicle":
+            default_action = "Reduce speed"
+            default_risk = "high"
+        elif obs_type == "pothole":
+            default_action = "Move left"
+            default_risk = "medium"
+        else:
+            default_action = "Exercise caution"
+            default_risk = "medium"
+
         replay_meta = obs.get("_replay_meta")
 
-        # Risk ranking for strengthening rule (risk can increase, never decrease)
-        RISK_RANK = {
-            "low": 0,
-            "medium": 1,
-            "high": 2,
-        }
-        
-        if matched_hazard:
-            hazard_id = matched_hazard["id"]
-            # Update matching hazard
-            sources_vehicles = set(matched_hazard.get("source_vehicles", []))
-            sources_vehicles.add(source_vehicle_id)
-            sources_count = len(sources_vehicles)
-            
-            # Recalculate confidence
-            # Base confidence = 60 + min(40, (sources - 1) * 20)
-            base_confidence = 60 + min(40, (sources_count - 1) * 20)
-            confirmed = matched_hazard.get("confirmed", 0)
-            reported_incorrect = matched_hazard.get("reportedIncorrect", 0)
-            
-            # Decay: 0.1 points per second since last update
-            elapsed = current_time - matched_hazard.get("updated_at", current_time)
-            decay = elapsed * 0.1
-            
-            confidence = max(0, min(100, int(base_confidence + confirmed * 10 - reported_incorrect * 15 - decay)))
-            
-            # Update hazard in MongoDB
-            matched_hazard["sources"] = sources_count
-            matched_hazard["source_vehicles"] = list(sources_vehicles)
-            matched_hazard["confidence"] = confidence
-            matched_hazard["updated_at"] = current_time
-            matched_hazard["observedSecondsAgo"] = 0
-
-            # Apply replay provenance metadata to matched hazard
-            if replay_meta:
-                supplied_action = replay_meta.get("recommendedAction")
-                if supplied_action:
-                    matched_hazard["recommendedAction"] = supplied_action
-
-                supplied_risk = replay_meta.get("risk")
-                if supplied_risk and supplied_risk in RISK_RANK:
-                    existing_risk = matched_hazard.get("risk")
-                    if existing_risk not in RISK_RANK:
-                        # Existing risk is missing/invalid, set it
-                        matched_hazard["risk"] = supplied_risk
-                    elif RISK_RANK[supplied_risk] >= RISK_RANK[existing_risk]:
-                        # Only increase or maintain, never decrease
-                        matched_hazard["risk"] = supplied_risk
-
-                for key in ("model", "inferenceMode", "sampleId", "lastInferenceId"):
-                    value = replay_meta.get(key)
-                    if value is not None:
-                        matched_hazard[key] = value
-
-                if replay_meta.get("confidence") is not None:
-                    matched_hazard["replayConfidence"] = replay_meta["confidence"]
-            
-            # Determine action based on (possibly updated) recommendedAction
-            rec_action = matched_hazard.get("recommendedAction", "Exercise caution")
-            
-            # Add dynamic multilingual warnings
-            warnings = WarningService.generate_warning_texts(obs_type, int(matched_hazard["distanceMeters"]), rec_action)
-            matched_hazard["warnings"] = warnings
-            
-            # Status check
-            if confidence <= 0 or reported_incorrect >= 5:
-                matched_hazard["status"] = "resolved"
-            else:
-                matched_hazard["status"] = "active"
-
-            await db.hazards.replace_one({"id": hazard_id}, matched_hazard)
-            result_hazard = matched_hazard
+        # 7a. Action resolution
+        if replay_meta and replay_meta.get("recommendedAction"):
+            final_action = replay_meta.get("recommendedAction")
+        elif matched_hazard:
+            final_action = matched_hazard.get("recommendedAction", default_action)
         else:
-            is_new = True
-            hazard_id = f"hz-{uuid.uuid4().hex[:8]}"
-            sources_vehicles = [source_vehicle_id]
-            sources_count = 1
-            confidence = 60 # Base confidence for 1 source
-            
-            # Estimate distance to ego
-            ego_lat = EGO["latitude"]
-            ego_lon = EGO["longitude"]
-            distance_to_ego = int(calculate_distance(lat, lon, ego_lat, ego_lon))
-            
-            rec_action = "Reduce speed" if obs_type == "stationary_vehicle" else "Move left" if obs_type == "pothole" else "Exercise caution"
-            risk_level = "high" if obs_type == "stationary_vehicle" else "medium"
+            final_action = default_action
 
-            # Use replay provenance metadata when available
-            if replay_meta:
-                rec_action = replay_meta.get("recommendedAction", rec_action)
-                risk_level = replay_meta.get("risk", risk_level)
-            warnings = WarningService.generate_warning_texts(obs_type, distance_to_ego, rec_action)
-            
-            new_hazard = {
-                "id": hazard_id,
-                "type": obs_type,
-                "label": obs.get("label", obs_type.replace("_", " ").title()),
-                "location": {"latitude": lat, "longitude": lon},
-                "polygon": obs.get("polygon"),
-                "distanceMeters": float(distance_to_ego),
-                "confidence": confidence,
-                "sources": sources_count,
-                "observedSecondsAgo": 0,
-                "direction": "Northbound lane",
-                "recommendedAction": rec_action,
-                "risk": risk_level,
-                "visibilityState": "hidden",
-                "sourceType": "shared_vehicle",
-                "routeRelevance": "high" if distance_to_ego < 250 else "medium",
-                "confirmed": 0,
-                "reportedIncorrect": 0,
-                "source_vehicles": sources_vehicles,
-                "segment_id": best_road_id,
-                "status": "active",
-                "created_at": current_time,
-                "updated_at": current_time,
-                "warnings": warnings
-            }
-            # Persist replay provenance fields on the hazard
-            if replay_meta:
-                new_hazard["model"] = replay_meta.get("model")
-                new_hazard["inferenceMode"] = replay_meta.get("inferenceMode")
-                new_hazard["sampleId"] = replay_meta.get("sampleId")
-                new_hazard["lastInferenceId"] = replay_meta.get("lastInferenceId")
-                if replay_meta.get("confidence") is not None:
-                    new_hazard["replayConfidence"] = replay_meta["confidence"]
-            await db.hazards.replace_one({"id": hazard_id}, new_hazard, upsert=True)
-            result_hazard = new_hazard
+        # 7b. Risk resolution (preserve or increase, never decrease)
+        if replay_meta and replay_meta.get("risk") in RISK_RANK:
+            replay_risk = replay_meta.get("risk")
+            if matched_hazard:
+                existing_risk = matched_hazard.get("risk")
+                if existing_risk in RISK_RANK and RISK_RANK[replay_risk] < RISK_RANK[existing_risk]:
+                    final_risk = existing_risk
+                else:
+                    final_risk = replay_risk
+            else:
+                final_risk = replay_risk
+        elif matched_hazard:
+            final_risk = matched_hazard.get("risk", default_risk)
+        else:
+            final_risk = default_risk
 
-        # 6. Record in MongoDB observations for idempotency
-        await db.observations.replace_one(
-            {"id": obs_id},
-            {
-                "id": obs_id,
-                "hazard_id": hazard_id,
-                "vehicle_id": source_vehicle_id,
-                "location": {"latitude": lat, "longitude": lon},
-                "timestamp": current_time
-            },
-            upsert=True
+        # 7c. Polygon resolution
+        if polygon is not None:
+            final_polygon = polygon
+        elif matched_hazard:
+            final_polygon = matched_hazard.get("polygon")
+        else:
+            final_polygon = None
+
+        hazard_fields = {
+            "distanceMeters": float(distance_to_ego),
+            "direction": "Northbound lane" if not matched_hazard else matched_hazard.get("direction", "Northbound lane"),
+            "recommendedAction": final_action,
+            "risk": final_risk,
+            "visibilityState": "hidden" if not matched_hazard else matched_hazard.get("visibilityState", "hidden"),
+            "sourceType": "shared_vehicle" if not matched_hazard else matched_hazard.get("sourceType", "shared_vehicle"),
+            "routeRelevance": "high" if distance_to_ego < 250 else "medium",
+            "polygon": final_polygon,
+            "status": "active" if not matched_hazard else matched_hazard.get("status", "active"),
+        }
+
+        # Map replay provenance variables
+        if replay_meta:
+            if "model" in replay_meta:
+                hazard_fields["model"] = replay_meta["model"]
+            if "inferenceMode" in replay_meta:
+                hazard_fields["inferenceMode"] = replay_meta["inferenceMode"]
+            if "sampleId" in replay_meta:
+                hazard_fields["sampleId"] = replay_meta["sampleId"]
+            if "lastInferenceId" in replay_meta:
+                hazard_fields["lastInferenceId"] = replay_meta["lastInferenceId"]
+            if "confidence" in replay_meta and replay_meta["confidence"] is not None:
+                hazard_fields["replayConfidence"] = float(replay_meta["confidence"])
+        elif matched_hazard:
+            for key in ("model", "inferenceMode", "sampleId", "lastInferenceId", "replayConfidence"):
+                if key in matched_hazard and matched_hazard[key] is not None:
+                    hazard_fields[key] = matched_hazard[key]
+
+        # 8. Graph Authoritative Write
+        if matched_hazard:
+            existing_label = matched_hazard.get("label")
+            if existing_label and isinstance(existing_label, str) and existing_label.strip():
+                upsert_hazard_label = existing_label
+            else:
+                upsert_hazard_label = label
+        else:
+            upsert_hazard_label = label
+
+        upsert_res = await graph_service.upsert_observation_and_hazard(
+            observation_id=obs_id,
+            vehicle_id=source_vehicle_id,
+            vehicle_label=vehicle_label,
+            hazard_id=selected_hazard_id,
+            hazard_type=obs_type,
+            hazard_label=upsert_hazard_label,
+            latitude=lat,
+            longitude=lon,
+            road_segment_id=road_segment_id,
+            road_segment_name=road_segment_name,
+            timestamp=current_time,
+            hazard_fields=hazard_fields,
         )
 
-        # 6b. Record provenance in the perception graph (secondary, non-fatal)
-        try:
-            from server import _perception_graph
-            await _perception_graph.record_observation(
-                observation_id=obs_id,
-                vehicle_id=source_vehicle_id,
-                vehicle_label=vehicle_label,
-                hazard_id=hazard_id,
-                hazard_type=obs_type,
-                hazard_label=result_hazard["label"],
-                road_segment_id=best_road_id,
-                road_segment_name="GST Road Northbound" if best_road_id == "gst" else "Velachery Link Rd" if best_road_id == "side" else "Service Rd",
-                timestamp=current_time,
-            )
-        except Exception as e:
-            logger.warning(f"PerceptionGraphService record_observation failed: {e}")
+        result_hazard = upsert_res["hazard"]
 
-        # 7. Record Graph Relationships in Neo4j (and its fallback)
-        try:
-            # Merge vehicle
-            await Neo4jService.record_vehicle(source_vehicle_id, vehicle_label)
-            # Merge road segment
-            road_name = "GST Road Northbound" if best_road_id == "gst" else "Velachery Link Rd" if best_road_id == "side" else "Service Rd"
-            await Neo4jService.record_road_segment(best_road_id, road_name)
-            # Link vehicle Approaching segment (for observer, we can set it to best_road_id)
-            await Neo4jService.record_vehicle_approaching(source_vehicle_id, best_road_id)
-            # Link hazard LocatedOn segment
-            await Neo4jService.record_hazard(hazard_id, best_road_id, result_hazard)
-            # Link vehicle Made observation, which describes hazard
-            await Neo4jService.record_observation(
-                obs_id,
-                source_vehicle_id,
-                hazard_id,
-                {"type": obs_type, "label": result_hazard["label"], "observedSecondsAgo": 0}
-            )
-        except Exception as e:
-            logger.warning(f"Error updating Neo4j relationship during workflow: {e}")
+        # 9. Presentation Response Construction
+        response = dict(result_hazard)
+        response.pop("_id", None)
 
-        # 8. Find Approaching Vehicles & Generate Warning Events
-        # Let's say all nearby vehicles are approaching their respective segments
-        warning_events = []
-        try:
-            nearby_vehicles = await db.nearby_vehicles.find({}).to_list(100)
-            for vehicle in nearby_vehicles:
-                # Link nearby vehicles to segment gst or side or service
-                v_id = vehicle["id"]
-                # In demo, vehicles are on GST
-                await Neo4jService.record_vehicle(v_id, vehicle.get("label", v_id))
-                await Neo4jService.record_vehicle_approaching(v_id, "gst")
-                
-                # Check if this vehicle is approaching the road segment of the hazard
-                relevant_hazard_ids = await Neo4jService.get_relevant_hazards(v_id)
-                if hazard_id in relevant_hazard_ids:
-                    # Create WarningEvent
-                    warning_text = result_hazard["warnings"]["en"]
-                    warning_id = f"wrn-{obs_id}-{v_id}"
+        updated_at = response.get("updated_at") or current_time
+        response["observedSecondsAgo"] = max(0, int(current_time - updated_at))
 
-                    warning_event_recorded = False
+        dist_m = response.get("distanceMeters")
+        if dist_m is None:
+            dist_m = distance_to_ego
 
-                    # 8b. Record warning in the perception graph (secondary, non-fatal)
-                    try:
-                        from server import _perception_graph
-                        await _perception_graph.record_warning(
-                            warning_id=warning_id,
-                            hazard_id=hazard_id,
-                            vehicle_id=v_id,
-                            warning_text=warning_text,
-                            language="en",
-                            road_segment_id=best_road_id,
-                            timestamp=current_time,
-                        )
-                        warning_event_recorded = True
-                    except Exception as e:
-                        logger.warning(f"PerceptionGraphService record_warning failed: {e}")
+        warnings = WarningService.generate_warning_texts(
+            response["type"],
+            int(dist_m),
+            response.get("recommendedAction", "Exercise caution")
+        )
+        response["warnings"] = warnings
 
-                    # Store WarningEvent node & relationships
-                    try:
-                        await Neo4jService.record_warning_event(
-                            warning_id,
-                            v_id,
-                            hazard_id,
-                            warning_text,
-                            "en"
-                        )
-                        warning_event_recorded = True
-                    except Exception as e:
-                        logger.warning(f"Neo4jService record_warning_event failed: {e}")
+        # Record warning events
+        response["_warning_events"] = await _record_warning_events(
+            graph_service=graph_service,
+            hazard_id=response["id"],
+            obs_id=obs_id,
+            source_vehicle_id=source_vehicle_id,
+            road_segment_id=response.get("segment_id") or road_segment_id,
+            warnings=warnings,
+            current_time=current_time
+        )
 
-                    # Only append after at least one recording succeeded
-                    if warning_event_recorded:
-                        warning_events.append(warning_id)
-        except Exception as e:
-            logger.warning(f"Error generating warning events in Neo4j during workflow: {e}")
-
-        # Remove internal fields before returning
-        return_dict = dict(result_hazard)
-        return_dict.pop("_id", None)
-        # Attach warning event IDs for activation service
-        return_dict["_warning_events"] = warning_events
-        return return_dict
+        return response

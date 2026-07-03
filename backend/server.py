@@ -456,6 +456,20 @@ async def ensure_seed() -> None:
     )
 
 
+async def _seed_demo_graph_vehicles() -> None:
+    for v in SEED_VEHICLES:
+        try:
+            await _perception_graph.upsert_vehicle_approach(
+                vehicle_id=v["id"],
+                vehicle_label=v["label"],
+                road_segment_id="gst",
+                road_segment_name="GST Road Northbound",
+            )
+        except Exception as e:
+            logger.error(f"Demo graph vehicle seeding failed: {type(e).__name__}")
+            raise RuntimeError("Demo graph vehicle seeding failed") from None
+
+
 # ======================= App =======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -464,6 +478,7 @@ async def lifespan(app: FastAPI):
     set_store(store)
 
     await _perception_graph.initialize()
+    await _seed_demo_graph_vehicles()
     await _training_samples.initialize()
     await _demo_replay.initialize()
     try:
@@ -677,11 +692,79 @@ async def report_incorrect(hazard_id: str):
     )
 
 
+async def _cache_graph_hazard_for_legacy_reads(hazard: dict) -> None:
+    """Non-authoritative temporary read model for db.hazards compatibility.
+
+    Stores only the explicit fields needed by unmigrated legacy routes.
+    Does not persist warnings, _warning_events, source_vehicles, or observations.
+    Failure to cache does not propagate.
+    """
+    try:
+        # Extract location to GeoPoint format
+        loc = hazard.get("location")
+        geo_loc = {}
+        if isinstance(loc, dict):
+            geo_loc = {
+                "latitude": loc.get("latitude"),
+                "longitude": loc.get("longitude"),
+                "headingDegrees": loc.get("headingDegrees"),
+                "label": loc.get("label"),
+            }
+
+        # Extract polygon if present
+        poly = hazard.get("polygon")
+        geo_poly = None
+        if isinstance(poly, list):
+            geo_poly = []
+            for pt in poly:
+                if isinstance(pt, dict):
+                    geo_poly.append({
+                        "latitude": pt.get("latitude"),
+                        "longitude": pt.get("longitude"),
+                        "headingDegrees": pt.get("headingDegrees"),
+                        "label": pt.get("label"),
+                    })
+
+        cache_doc = {
+            "id": hazard["id"],
+            "type": hazard["type"],
+            "label": hazard["label"],
+            "location": geo_loc,
+            "polygon": geo_poly,
+            "distanceMeters": float(hazard.get("distanceMeters", 0.0)),
+            "confidence": int(hazard.get("confidence", 60)),
+            "sources": int(hazard.get("sources", 1)),
+            "observedSecondsAgo": int(hazard.get("observedSecondsAgo", 0)),
+            "direction": hazard.get("direction", "Northbound lane"),
+            "recommendedAction": hazard.get("recommendedAction", "Exercise caution"),
+            "risk": hazard.get("risk", "medium"),
+            "visibilityState": hazard.get("visibilityState", "hidden"),
+            "sourceType": hazard.get("sourceType", "shared_vehicle"),
+            "routeRelevance": hazard.get("routeRelevance", "medium"),
+            "confirmed": int(hazard.get("confirmed", 0)),
+            "reportedIncorrect": int(hazard.get("reportedIncorrect", 0)),
+            "status": hazard.get("status", "active"),
+            "segment_id": hazard.get("segment_id", ""),
+            "created_at": hazard.get("created_at"),
+            "updated_at": hazard.get("updated_at"),
+        }
+        await db.hazards.replace_one({"id": hazard["id"]}, cache_doc, upsert=True)
+    except Exception as e:
+        logger.warning("Cache write failed: %s", type(e).__name__)
+
+
 @api_router.post("/sentinel/demo/observation")
 async def demo_observation(req: DemoObservationRequest):
     from workflows.hazard_workflow import LocalWorkflowRunner
-    runner = LocalWorkflowRunner()
+    runner = LocalWorkflowRunner(
+        graph_service=_perception_graph,
+        ego_location=EGO,
+    )
     res = await runner.process_observation(req.model_dump())
+
+    # Backwards-compatibility cache update for unmigrated legacy routes
+    await _cache_graph_hazard_for_legacy_reads(res)
+
     return res
 
 
@@ -689,8 +772,13 @@ async def demo_observation(req: DemoObservationRequest):
 async def demo_reset():
     try:
         await _perception_graph.reset_demo_data()
+        await _seed_demo_graph_vehicles()
     except Exception as e:
-        logger.warning(f"PerceptionGraphService reset failed: {type(e).__name__}")
+        logger.error(f"PerceptionGraphService reset/seeding failed: {type(e).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail="Demo reset failed due to graph database error"
+        )
     await db.hazards.delete_many({})
     await db.observations.delete_many({})
     await db.sentinel_meta.delete_many({})
