@@ -103,3 +103,4 @@ service-account*.json
 
 # Replay Pack reports and generated items
 demo_smoke_report.json
+/.gitconfig
