@@ -834,17 +834,19 @@ async def test_legacy_read_cache_failure_does_not_rollback_graph():
         "vehicleLabel": "Sentinel Vehicle"
     }
 
-    # Mock db.hazards class replace_one to fail
+    # Mock db.hazards class replace_one to fail conditionally
+    mock_enabled = False
     hazards_class = db.hazards.__class__
     original_replace = hazards_class.replace_one
     async def mock_replace(self_coll, *args, **kwargs):
-        if getattr(self_coll, "name", None) == "hazards":
+        if mock_enabled and getattr(self_coll, "name", None) == "hazards":
             raise RuntimeError("DB connection error")
         return await original_replace(self_coll, *args, **kwargs)
     hazards_class.replace_one = mock_replace
 
     try:
         with TestClient(app) as c:
+            mock_enabled = True
             r = c.post("/api/sentinel/demo/observation", json=obs)
             assert r.status_code == 200
             res = r.json()
