@@ -155,9 +155,9 @@ async def test_6_duplicate_observation_no_source_count_increase(graph_service):
     res2 = await runner.process_observation(obs)
     assert res2["sources"] == 1
 
-# 7. Duplicate observation returns _warning_events=[].
+# 7. Duplicate observation returns warnings and deterministic warning event ID.
 @pytest.mark.anyio
-async def test_7_duplicate_observation_returns_empty_warning_events(graph_service):
+async def test_7_duplicate_observation_returns_warning_event(graph_service):
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-7",
@@ -167,9 +167,12 @@ async def test_7_duplicate_observation_returns_empty_warning_events(graph_servic
         "sourceVehicleId": "v-7",
         "vehicleLabel": "Vehicle 7"
     }
-    await runner.process_observation(obs)
+    res1 = await runner.process_observation(obs)
+    expected_warn_id = f"warn-{res1['id']}-obs-7-v-7-en"
+    assert res1["_warning_events"] == [expected_warn_id]
+
     res2 = await runner.process_observation(obs)
-    assert res2["_warning_events"] == []
+    assert res2["_warning_events"] == [expected_warn_id]
 
 # 8. Second distinct vehicle within matching radius reuses the hazard.
 @pytest.mark.anyio
@@ -470,9 +473,9 @@ async def test_18_warning_text_returned(graph_service):
     assert "en" in res["warnings"]
     assert "hi" in res["warnings"]
 
-# 19. No Warning node is created during Stage B1.
+# 19. Warning node is created with correct relationships in Stage B2A.
 @pytest.mark.anyio
-async def test_19_no_warning_node_created(graph_service):
+async def test_19_warning_node_created_with_relationships(graph_service):
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-19",
@@ -483,10 +486,27 @@ async def test_19_no_warning_node_created(graph_service):
         "vehicleLabel": "Vehicle 19"
     }
     res = await runner.process_observation(obs)
-    
+
+    # Assert response elements
+    assert "warnings" in res
+    assert "en" in res["warnings"]
+    assert len(res.get("_warning_events", [])) == 1
+    warn_id = res["_warning_events"][0]
+
     graph = await graph_service.build_graph(hazard_id=res["id"])
     node_types = [n["type"] for n in graph["nodes"]]
-    assert "Warning" not in node_types
+    assert "Warning" in node_types
+
+    # Find warning node properties
+    warn_node = next(n for n in graph["nodes"] if n["type"] == "Warning")
+    assert warn_node["id"] == warn_id
+    assert warn_node["properties"]["language"] == "en"
+    assert warn_node["properties"]["text"] == res["warnings"]["en"]
+
+    # Assert relationship existence
+    edge_types = [e["type"] for e in graph["edges"]]
+    assert "TRIGGERED_WARNING" in edge_types
+    assert "DELIVERED_TO" in edge_types
 
 # 20. Invalid observation data fails before mutation.
 @pytest.mark.anyio
@@ -609,7 +629,7 @@ async def test_25_replay_activation_contracts():
     activation = await activate_inference(result, location)
     assert activation.activated is True
     assert activation.warning_text_generated is True
-    assert activation.warning_event_created is False
+    assert activation.warning_event_created is True
 
 
 # ---------------------------------------------------------------------------
@@ -845,3 +865,80 @@ async def test_legacy_read_cache_failure_does_not_rollback_graph():
     finally:
         hazards_class.replace_one = original_replace
 
+
+# ---------------------------------------------------------------------------
+# Stage B2A local warning recording regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_b2a_basic_warning_event_creation(graph_service):
+    runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-b2a-1",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-1",
+        "vehicleLabel": "Sentinel Vehicle"
+    }
+    res = await runner.process_observation(obs)
+    assert len(res.get("_warning_events", [])) == 1
+    warn_id = res["_warning_events"][0]
+
+    graph = await graph_service.build_graph(hazard_id=res["id"])
+    node_types = [n["type"] for n in graph["nodes"]]
+    edge_types = [e["type"] for e in graph["edges"]]
+    assert "Warning" in node_types
+    assert "TRIGGERED_WARNING" in edge_types
+    assert "DELIVERED_TO" in edge_types
+
+
+@pytest.mark.anyio
+async def test_b2a_idempotent_duplicate_observation(graph_service):
+    runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-b2a-2",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-1",
+        "vehicleLabel": "Sentinel Vehicle"
+    }
+    res1 = await runner.process_observation(obs)
+    res2 = await runner.process_observation(obs)
+
+    assert res1["id"] == res2["id"]
+    assert res1["_warning_events"] == res2["_warning_events"]
+
+    graph = await graph_service.build_graph(hazard_id=res1["id"])
+    warning_nodes = [n for n in graph["nodes"] if n["type"] == "Warning"]
+    assert len(warning_nodes) == 1
+
+
+@pytest.mark.anyio
+async def test_b2a_warning_failure_is_non_fatal(graph_service):
+    runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-b2a-3",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-1",
+        "vehicleLabel": "Sentinel Vehicle"
+    }
+
+    from unittest.mock import patch, AsyncMock
+    with patch.object(graph_service, "record_warning", new=AsyncMock(side_effect=RuntimeError("warning db failed"))):
+        res = await runner.process_observation(obs)
+
+        # Verify success
+        assert res is not None
+        assert "id" in res
+        assert "warnings" in res
+        assert "en" in res["warnings"]
+        assert res["_warning_events"] == []
+
+        # Verify graph still has the hazard
+        graph_hz = await graph_service.get_observation_hazard("obs-b2a-3")
+        assert graph_hz is not None
+        assert graph_hz["id"] == res["id"]

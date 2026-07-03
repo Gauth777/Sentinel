@@ -322,8 +322,15 @@ class _InMemoryGraphBackend:
                 f"Warning {warning_id}",
                 {"text": warning_text, "language": language, "timestamp": ts},
             )
-            self._merge_node_sync(hazard_id, "Hazard", hazard_id, {})
-            self._merge_node_sync(vehicle_id, "Vehicle", vehicle_id, {})
+            hz_label = hazard_id
+            if hazard_id in self._nodes:
+                hz_label = self._nodes[hazard_id].get("label", hazard_id)
+            self._merge_node_sync(hazard_id, "Hazard", hz_label, {})
+
+            v_label = vehicle_id
+            if vehicle_id in self._nodes:
+                v_label = self._nodes[vehicle_id].get("label", vehicle_id)
+            self._merge_node_sync(vehicle_id, "Vehicle", v_label, {})
 
             self._merge_edge_sync(
                 f"TRIGGERED_WARNING:{hazard_id}:{warning_id}",
@@ -341,8 +348,11 @@ class _InMemoryGraphBackend:
             )
 
             if road_segment_id:
+                r_label = road_segment_id
+                if road_segment_id in self._nodes:
+                    r_label = self._nodes[road_segment_id].get("label", road_segment_id)
                 self._merge_node_sync(
-                    road_segment_id, "RoadSegment", road_segment_id, {}
+                    road_segment_id, "RoadSegment", r_label, {}
                 )
                 self._merge_edge_sync(
                     f"APPROACHING:{vehicle_id}:{road_segment_id}",
