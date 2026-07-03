@@ -2,7 +2,7 @@ import hashlib
 import logging
 import math
 import time
-from typing import Optional
+from typing import Optional, List
 
 from services.warning_service import WarningService
 from utils.geo import haversine_meters
@@ -77,6 +77,75 @@ def generate_deterministic_hazard_id(observation_id: str) -> str:
 def generate_deterministic_warning_id(hazard_id: str, observation_id: str, vehicle_id: str, language: str) -> str:
     """Generates a deterministic and stable warning ID."""
     return f"warn-{hazard_id}-{observation_id}-{vehicle_id}-{language}"
+
+
+async def _record_warning_events(
+    graph_service,
+    hazard_id: str,
+    obs_id: str,
+    source_vehicle_id: str,
+    road_segment_id: Optional[str],
+    warnings: dict,
+    current_time: float,
+) -> List[str]:
+    warning_ids = []
+
+    # 1. Attempt the existing local source warning
+    source_warning_id = generate_deterministic_warning_id(
+        hazard_id=hazard_id,
+        observation_id=obs_id,
+        vehicle_id=source_vehicle_id,
+        language="en"
+    )
+    try:
+        await graph_service.record_warning(
+            warning_id=source_warning_id,
+            hazard_id=hazard_id,
+            vehicle_id=source_vehicle_id,
+            warning_text=warnings["en"],
+            language="en",
+            road_segment_id=road_segment_id,
+            timestamp=current_time
+        )
+        warning_ids.append(source_warning_id)
+    except Exception as e:
+        logger.warning("Failed to record source warning event: %s", type(e).__name__)
+
+    # 2. Call get_warning_recipient_vehicle_ids
+    peer_vehicle_ids = []
+    try:
+        peer_vehicle_ids = await graph_service.get_warning_recipient_vehicle_ids(
+            hazard_id=hazard_id,
+            source_vehicle_id=source_vehicle_id
+        )
+    except Exception as e:
+        logger.warning("Failed to look up peer warning recipients: %s", type(e).__name__)
+
+    # 3. For each returned peer ID, record one warning
+    for peer_id in peer_vehicle_ids:
+        if peer_id == source_vehicle_id:
+            continue
+        peer_warning_id = generate_deterministic_warning_id(
+            hazard_id=hazard_id,
+            observation_id=obs_id,
+            vehicle_id=peer_id,
+            language="en"
+        )
+        try:
+            await graph_service.record_warning(
+                warning_id=peer_warning_id,
+                hazard_id=hazard_id,
+                vehicle_id=peer_id,
+                warning_text=warnings["en"],
+                language="en",
+                road_segment_id=road_segment_id,
+                timestamp=current_time
+            )
+            warning_ids.append(peer_warning_id)
+        except Exception as e:
+            logger.warning("Failed to record peer warning event for %s: %s", peer_id, type(e).__name__)
+
+    return warning_ids
 
 
 class WorkflowRunner:
@@ -214,27 +283,16 @@ class LocalWorkflowRunner(WorkflowRunner):
             )
             hz_copy["warnings"] = warnings
 
-            # Record local warning event
-            warning_id = generate_deterministic_warning_id(
+            # Record warning events
+            hz_copy["_warning_events"] = await _record_warning_events(
+                graph_service=graph_service,
                 hazard_id=hz_copy["id"],
-                observation_id=obs_id,
-                vehicle_id=source_vehicle_id,
-                language="en"
+                obs_id=obs_id,
+                source_vehicle_id=source_vehicle_id,
+                road_segment_id=hz_copy.get("segment_id"),
+                warnings=warnings,
+                current_time=current_time
             )
-            try:
-                await graph_service.record_warning(
-                    warning_id=warning_id,
-                    hazard_id=hz_copy["id"],
-                    vehicle_id=source_vehicle_id,
-                    warning_text=warnings["en"],
-                    language="en",
-                    road_segment_id=hz_copy.get("segment_id"),
-                    timestamp=current_time
-                )
-                hz_copy["_warning_events"] = [warning_id]
-            except Exception as e:
-                logger.warning("Failed to record warning event: %s", type(e).__name__)
-                hz_copy["_warning_events"] = []
 
             return hz_copy
 
@@ -386,26 +444,15 @@ class LocalWorkflowRunner(WorkflowRunner):
         )
         response["warnings"] = warnings
 
-        # Record local warning event
-        warning_id = generate_deterministic_warning_id(
+        # Record warning events
+        response["_warning_events"] = await _record_warning_events(
+            graph_service=graph_service,
             hazard_id=response["id"],
-            observation_id=obs_id,
-            vehicle_id=source_vehicle_id,
-            language="en"
+            obs_id=obs_id,
+            source_vehicle_id=source_vehicle_id,
+            road_segment_id=response.get("segment_id") or road_segment_id,
+            warnings=warnings,
+            current_time=current_time
         )
-        try:
-            await graph_service.record_warning(
-                warning_id=warning_id,
-                hazard_id=response["id"],
-                vehicle_id=source_vehicle_id,
-                warning_text=warnings["en"],
-                language="en",
-                road_segment_id=response.get("segment_id") or road_segment_id,
-                timestamp=current_time
-            )
-            response["_warning_events"] = [warning_id]
-        except Exception as e:
-            logger.warning("Failed to record warning event: %s", type(e).__name__)
-            response["_warning_events"] = []
 
         return response

@@ -388,8 +388,8 @@ async def test_neo4j_warning_missing_nodes_rejected():
         await svc.record_warning("wrn-1", "hz-1", "v-A", "text", "en")
 
     # 2. Vehicle missing
-    # Hazard check: exists with correct labels & scenario
-    mock_driver.result_queue.append([{"labels": ["Hazard", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
+    # Hazard check: exists
+    mock_driver.result_queue.append([{"exists": True}])
     # Vehicle check: missing
     mock_driver.result_queue.append([]) 
     with pytest.raises(ValueError, match="Vehicle node v-A does not exist"):
@@ -397,9 +397,9 @@ async def test_neo4j_warning_missing_nodes_rejected():
 
     # 3. Road segment missing
     # Hazard check: exists
-    mock_driver.result_queue.append([{"labels": ["Hazard", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
+    mock_driver.result_queue.append([{"exists": True}])
     # Vehicle check: exists
-    mock_driver.result_queue.append([{"labels": ["Vehicle", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
+    mock_driver.result_queue.append([{"exists": True}])
     # Road segment check: missing
     mock_driver.result_queue.append([])
     with pytest.raises(ValueError, match="RoadSegment node seg-1 does not exist"):
@@ -417,38 +417,37 @@ async def test_neo4j_warning_retry_and_conflicts():
 
     # --- Case A: Exact retry matches ---
     # Hazard exists
-    mock_driver.result_queue.append([{"labels": ["Hazard", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
+    mock_driver.result_queue.append([{"exists": True}])
     # Vehicle exists
-    mock_driver.result_queue.append([{"labels": ["Vehicle", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
-    # Warning exists (matching text, lang, road segment)
+    mock_driver.result_queue.append([{"exists": True}])
+    # Warning merge returns text, lang, road segment
     mock_driver.result_queue.append([{
-        "labels": ["Warning", "SentinelPerception"],
-        "scenario_id": SCENARIO_ID,
         "text": "Pothole ahead",
         "language": "en",
         "roadSegmentId": None
     }])
-    # Rels exist
-    mock_driver.result_queue.append([{"rels_exist": True}])
+    # rel_check returns hazard_ids, vehicle_ids matching current
+    mock_driver.result_queue.append([{
+        "hazard_ids": ["hz-1"],
+        "vehicle_ids": ["v-A"]
+    }])
 
     # Call record_warning: should complete without calling CREATE queries
     await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
 
-    # Verify no create queries were run
+    # Verify no CREATE statements were run
     for q, p in mock_driver.queries:
-        assert "CREATE" not in q.upper()
+        assert "CREATE (" not in q.upper()
 
     # --- Case B: Conflicts ---
     # Same warning ID but conflicting properties
     mock_driver.queries.clear()
     # Hazard exists
-    mock_driver.result_queue.append([{"labels": ["Hazard", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
+    mock_driver.result_queue.append([{"exists": True}])
     # Vehicle exists
-    mock_driver.result_queue.append([{"labels": ["Vehicle", "SentinelPerception"], "scenario_id": SCENARIO_ID}])
-    # Warning exists with different text
+    mock_driver.result_queue.append([{"exists": True}])
+    # Warning merge returns different text
     mock_driver.result_queue.append([{
-        "labels": ["Warning", "SentinelPerception"],
-        "scenario_id": SCENARIO_ID,
         "text": "Different text",
         "language": "en",
         "roadSegmentId": None
@@ -456,3 +455,199 @@ async def test_neo4j_warning_retry_and_conflicts():
 
     with pytest.raises(ValueError, match="properties conflict"):
         await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+
+
+# ============================================================================
+# 5. Stage B2B focused tests
+# ============================================================================
+
+@pytest.mark.anyio
+async def test_upsert_vehicle_approach_validations():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    # validate all four arguments as non-empty strings
+    with pytest.raises(ValueError, match="vehicle_id"):
+        await svc.upsert_vehicle_approach("", "Label", "road-1", "Road 1")
+    with pytest.raises(ValueError, match="vehicle_label"):
+        await svc.upsert_vehicle_approach("v-1", "", "road-1", "Road 1")
+    with pytest.raises(ValueError, match="road_segment_id"):
+        await svc.upsert_vehicle_approach("v-1", "Label", "", "Road 1")
+    with pytest.raises(ValueError, match="road_segment_name"):
+        await svc.upsert_vehicle_approach("v-1", "Label", "road-1", "")
+
+
+@pytest.mark.anyio
+async def test_upsert_vehicle_approach_memory_parity():
+    svc = PerceptionGraphService()
+    await svc.initialize() # default memory mode
+
+    await svc.upsert_vehicle_approach("v-1", "Vehicle 1", "road-1", "Road 1")
+    # Repeated seeding is idempotent
+    await svc.upsert_vehicle_approach("v-1", "Vehicle 1", "road-1", "Road 1")
+
+    # Conflict check: existing ID with wrong type
+    # Hazard hz-1 exists
+    await svc.record_observation(
+        observation_id="obs-1",
+        vehicle_id="v-1",
+        vehicle_label="Vehicle 1",
+        hazard_id="hz-1",
+        hazard_type="pothole",
+        hazard_label="Pothole",
+        road_segment_id="road-1",
+        road_segment_name="Road 1",
+        timestamp=100.0,
+    )
+    # Merging road-1 (which is RoadSegment) as Vehicle must raise ValueError
+    with pytest.raises(ValueError, match="already exists|exists but is not"):
+        await svc.upsert_vehicle_approach(
+            vehicle_id="road-1",
+            vehicle_label="Vehicle Wrong",
+            road_segment_id="road-another",
+            road_segment_name="Road Another"
+        )
+
+
+@pytest.mark.anyio
+async def test_recipient_lookup_scenarios():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    # Pre-create Hazard hz-1, Vehicle v-A, RoadSegment road-1
+    await svc.record_observation(
+        observation_id="obs-1",
+        vehicle_id="v-A",
+        vehicle_label="Vehicle A",
+        hazard_id="hz-1",
+        hazard_type="pothole",
+        hazard_label="Pothole",
+        road_segment_id="road-1",
+        road_segment_name="Road 1",
+        timestamp=100.0,
+    )
+
+    # Pre-create Hazard hz-2, Vehicle v-B, RoadSegment road-2
+    await svc.record_observation(
+        observation_id="obs-2",
+        vehicle_id="v-B",
+        vehicle_label="Vehicle B",
+        hazard_id="hz-2",
+        hazard_type="pothole",
+        hazard_label="Pothole",
+        road_segment_id="road-2",
+        road_segment_name="Road 2",
+        timestamp=100.0,
+    )
+
+    # Approach road-1 for peer vehicle v-C and v-D
+    await svc.upsert_vehicle_approach("v-C", "Vehicle C", "road-1", "Road 1")
+    await svc.upsert_vehicle_approach("v-D", "Vehicle D", "road-1", "Road 1")
+
+    # 1. Same-road peers returned sorted & source vehicle excluded
+    peers = await svc.get_warning_recipient_vehicle_ids(hazard_id="hz-1", source_vehicle_id="v-A")
+    assert peers == ["v-C", "v-D"]
+
+    # 2. Different-road vehicle v-B is excluded from hz-1 recipients
+    assert "v-B" not in peers
+
+    # 3. Duplicate APPROACHING edges do not duplicate recipients
+    await svc.upsert_vehicle_approach("v-C", "Vehicle C", "road-1", "Road 1")
+    peers_dup = await svc.get_warning_recipient_vehicle_ids(hazard_id="hz-1", source_vehicle_id="v-A")
+    assert peers_dup == ["v-C", "v-D"]
+
+    # 4. Resolved hazard returns no recipients
+    # Set hazard status to resolved
+    svc._memory._nodes["hz-1"]["properties"]["status"] = "resolved"
+    peers_resolved = await svc.get_warning_recipient_vehicle_ids(hazard_id="hz-1", source_vehicle_id="v-A")
+    assert peers_resolved == []
+
+    # Restore active status
+    svc._memory._nodes["hz-1"]["properties"]["status"] = "active"
+
+    # 5. Zero or multiple valid ON_ROAD relationships rejected
+    # Zero ON_ROAD: delete ON_ROAD edge
+    edge_id = f"ON_ROAD:hz-1:road-1"
+    old_edge = svc._memory._edges.pop(edge_id, None)
+    with pytest.raises(ValueError, match="zero valid ON_ROAD"):
+        await svc.get_warning_recipient_vehicle_ids(hazard_id="hz-1", source_vehicle_id="v-A")
+
+    # Multiple ON_ROAD: put original and add a second road segment
+    if old_edge:
+        svc._memory._edges[edge_id] = old_edge
+    await svc.upsert_vehicle_approach("v-dummy", "Dummy", "road-2", "Road 2")
+    svc._memory._merge_edge_sync("ON_ROAD:hz-1:road-2", "ON_ROAD", "hz-1", "road-2", {})
+    with pytest.raises(ValueError, match="multiple valid ON_ROAD"):
+        await svc.get_warning_recipient_vehicle_ids(hazard_id="hz-1", source_vehicle_id="v-A")
+
+
+@pytest.mark.anyio
+async def test_workflow_peer_delivery_integration():
+    from workflows.hazard_workflow import LocalWorkflowRunner
+
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    # Pre-register peers v-B and v-C approaching "gst"
+    await svc.upsert_vehicle_approach("v-B", "Vehicle B", "gst", "GST Road Northbound")
+    await svc.upsert_vehicle_approach("v-C", "Vehicle C", "gst", "GST Road Northbound")
+
+    runner = LocalWorkflowRunner(graph_service=svc, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-wf-1",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-A",
+        "vehicleLabel": "Vehicle A"
+    }
+
+    # Process: should write observation/hazard, source warning (v-A), and peer warnings (v-B, v-C)
+    res = await runner.process_observation(obs)
+    assert res is not None
+
+    # 3 warning events: source v-A, peer v-B, peer v-C
+    warning_events = res.get("_warning_events", [])
+    assert len(warning_events) == 3
+
+    # Check ordering is deterministic: source first, then peers sorted lexicographically
+    # warning ID format: warn-{hazard_id}-{obs_id}-{vehicle_id}-{lang}
+    hazard_id = res["id"]
+    expected_source = f"warn-{hazard_id}-obs-wf-1-v-A-en"
+    expected_b = f"warn-{hazard_id}-obs-wf-1-v-B-en"
+    expected_c = f"warn-{hz_id if 'hz_id' in locals() else hazard_id}-obs-wf-1-v-C-en"
+    assert warning_events == [expected_source, expected_b, expected_c]
+
+    # Verify Warning nodes and relationships in the graph
+    graph = await svc.build_graph(hazard_id=hazard_id)
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    assert expected_source in nodes
+    assert expected_b in nodes
+    assert expected_c in nodes
+
+    # Duplicate observation retry does not duplicate nodes or relationships
+    res_dup = await runner.process_observation(obs)
+    assert res_dup["_warning_events"] == [expected_source, expected_b, expected_c]
+
+    # Check peer warning failure doesn't block other peers (mock record_warning to fail for v-B only)
+    orig_record_warning = svc.record_warning
+    async def mock_record_warning(*args, **kwargs):
+        if kwargs.get("vehicle_id") == "v-B":
+            raise RuntimeError("v-B warning write failure")
+        return await orig_record_warning(*args, **kwargs)
+
+    with patch.object(svc, "record_warning", new=mock_record_warning):
+        obs2 = {
+            "id": "obs-wf-2",
+            "type": "pothole",
+            "label": "Pothole",
+            "location": {"latitude": 12.9450, "longitude": 80.1503},
+            "sourceVehicleId": "v-A",
+            "vehicleLabel": "Vehicle A"
+        }
+        res2 = await runner.process_observation(obs2)
+        # Should record v-A and v-C warnings successfully and skip v-B
+        hz2_id = res2["id"]
+        expected_source2 = f"warn-{hz2_id}-obs-wf-2-v-A-en"
+        expected_c2 = f"warn-{hz2_id}-obs-wf-2-v-C-en"
+        assert res2["_warning_events"] == [expected_source2, expected_c2]
