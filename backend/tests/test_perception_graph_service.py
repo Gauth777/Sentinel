@@ -124,6 +124,12 @@ class FakeSession:
             raise RuntimeError("Fake constraint failure")
         return FakeResult(self._records)
 
+    async def execute_write(self, tx_func, **params):
+        return await tx_func(self, **params)
+
+    async def execute_read(self, tx_func, **params):
+        return await tx_func(self, **params)
+
 
 class FakeNeo4jDriver:
     def __init__(self):
@@ -166,7 +172,7 @@ class FakeNeo4jModule:
 def clear_neo4j_env(monkeypatch):
     """Ensure no test can accidentally connect to a real Neo4j instance."""
     for key in list(os.environ.keys()):
-        if key.startswith("NEO4J_"):
+        if key.startswith("NEO4J_") or key == "SENTINEL_NEO4J_STRICT":
             monkeypatch.delenv(key, raising=False)
     yield
 
@@ -242,6 +248,17 @@ async def test_one_source_provenance_chain():
         road_segment_id="seg-gst",
         road_segment_name="GST Road",
         timestamp=1000.0,
+    )
+    await svc.record_observation(
+        observation_id="obs-2",
+        vehicle_id="v-B",
+        vehicle_label="Vehicle B",
+        hazard_id="hz-2",
+        hazard_type="pothole",
+        hazard_label="Deep Pothole",
+        road_segment_id="seg-gst",
+        road_segment_name="GST Road",
+        timestamp=1500.0,
     )
     await svc.record_warning(
         warning_id="wrn-1",
@@ -389,7 +406,7 @@ async def test_complete_warning_chain():
         "obs-2", "v-B", "Vehicle B", "hz-1", "pothole", "Pothole", "seg-gst", "GST", 2000.0
     )
     await svc.record_warning(
-        "wrn-1", "hz-1", "v-C", "Pothole ahead", "en", "seg-gst", 3000.0
+        "wrn-1", "hz-1", "v-B", "Pothole ahead", "en", "seg-gst", 3000.0
     )
     graph = await svc.build_graph(hazard_id="hz-1")
     assert graph["summary"]["focus"]["sourceCount"] == 2
@@ -449,6 +466,7 @@ async def test_non_demo_data_survives_reset():
 
 @pytest.mark.anyio
 async def test_no_credential_leakage(monkeypatch, fake_neo4j_module):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://secret-host:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "secret-user")
     monkeypatch.setenv("NEO4J_PASSWORD", "secret-pass")
@@ -490,6 +508,7 @@ async def test_memory_neo4j_schema_parity(fake_neo4j_module, monkeypatch, clear_
     memory_graph = await memory_service.build_graph(hazard_id="hz-1")
 
     # Build genuine fake-Neo4j graph
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
@@ -668,6 +687,7 @@ async def test_concurrent_duplicate_idempotency():
 
 @pytest.mark.anyio
 async def test_value_error_not_swallowed(fake_neo4j_module, monkeypatch, clear_neo4j_env):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
@@ -720,6 +740,7 @@ async def test_hazard_source_count_confidence_properties():
 
 @pytest.mark.anyio
 async def test_constraints_attempted(fake_neo4j_module, monkeypatch, clear_neo4j_env):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
@@ -753,6 +774,7 @@ async def test_constraints_attempted(fake_neo4j_module, monkeypatch, clear_neo4j
 
 @pytest.mark.anyio
 async def test_scoped_reset_query(fake_neo4j_module, monkeypatch, clear_neo4j_env):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
@@ -786,6 +808,7 @@ async def test_scoped_reset_query(fake_neo4j_module, monkeypatch, clear_neo4j_en
 
 @pytest.mark.anyio
 async def test_constraint_failure_fallback(fake_neo4j_module, monkeypatch, clear_neo4j_env, caplog):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
@@ -819,6 +842,7 @@ async def test_constraint_failure_fallback(fake_neo4j_module, monkeypatch, clear
 
 @pytest.mark.anyio
 async def test_neo4j_serialization(fake_neo4j_module, monkeypatch, clear_neo4j_env):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
     monkeypatch.setenv("NEO4J_URI", "bolt://fake:7687")
     monkeypatch.setenv("NEO4J_USERNAME", "user")
     monkeypatch.setenv("NEO4J_PASSWORD", "pass")
