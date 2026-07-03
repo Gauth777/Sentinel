@@ -580,6 +580,23 @@ class _InMemoryGraphBackend:
                         edges[eid] = e
                 return _normalize_response("memory", None, nodes, edges)
 
+    async def list_hazards(self, limit: int = 100) -> List[dict]:
+        async with self._lock:
+            hazards = [
+                n for n in self._nodes.values()
+                if n.get("type") == "Hazard" and n.get("scenarioId") == SCENARIO_ID
+            ]
+            def sort_key(n):
+                props = n.get("properties", {})
+                updated_at = float(props.get("updated_at", 0.0))
+                return (-updated_at, n["id"])
+
+            hazards.sort(key=sort_key)
+            result = []
+            for h in hazards[:limit]:
+                result.append(self._normalize_hazard_record_sync(h["id"]))
+            return result
+
     async def reset_demo_data(self) -> None:
         async with self._lock:
             to_delete_nodes = {
@@ -630,12 +647,16 @@ class _InMemoryGraphBackend:
         sorted_vehicles = sorted(list(source_vehicles))
         source_count = len(sorted_vehicles)
 
-        if source_count == 1:
-            confidence = 60
-        elif source_count == 2:
-            confidence = 80
+        confidence = props.get("confidence")
+        if confidence is None:
+            if source_count == 1:
+                confidence = 60
+            elif source_count == 2:
+                confidence = 80
+            else:
+                confidence = 100 if source_count >= 3 else 60
         else:
-            confidence = 100 if source_count >= 3 else 60
+            confidence = int(confidence)
 
         polygon = props.get("polygon", None)
         if polygon is not None:
@@ -1548,6 +1569,89 @@ class _Neo4jGraphBackend:
             "properties": {},
         }
 
+    async def list_hazards(self, limit: int = 100) -> List[dict]:
+        if self._driver is None:
+            raise RuntimeError("Neo4j driver not initialized")
+
+        cypher = """
+        MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})
+        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->
+                       (o:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+        WITH h, coalesce(r.id, '') as segment_id, collect(DISTINCT v.id) as source_vehicles
+        RETURN h, segment_id, source_vehicles
+        ORDER BY h.updated_at DESC, h.id ASC
+        LIMIT $limit
+        """
+        records = await self._run_read(cypher, scenario_id=SCENARIO_ID, limit=limit)
+
+        result = []
+        for record in records:
+            h_node = record["h"]
+            segment_id = record["segment_id"]
+            source_vehicles = sorted(record["source_vehicles"])
+            source_count = len(source_vehicles)
+
+            props = dict(h_node)
+            confidence = props.get("confidence")
+            if confidence is None:
+                if source_count == 1:
+                    confidence = 60
+                elif source_count == 2:
+                    confidence = 80
+                else:
+                    confidence = 100 if source_count >= 3 else 60
+            else:
+                confidence = int(confidence)
+            polygon = props.get("polygon")
+            if isinstance(polygon, str):
+                import json
+                try:
+                    polygon = json.loads(polygon)
+                except Exception:
+                    polygon = None
+            elif polygon is None:
+                polygon = props.get("polygon_json")
+                if isinstance(polygon, str):
+                    import json
+                    try:
+                        polygon = json.loads(polygon)
+                    except Exception:
+                        polygon = None
+
+            result.append({
+                "id": props.get("id", ""),
+                "type": props.get("type", ""),
+                "label": props.get("label", ""),
+                "location": {
+                    "latitude": float(props.get("latitude", 0.0)),
+                    "longitude": float(props.get("longitude", 0.0)),
+                },
+                "segment_id": segment_id,
+                "status": props.get("status", "active"),
+                "created_at": float(props.get("created_at", 0.0)),
+                "updated_at": float(props.get("updated_at", 0.0)),
+                "sources": source_count,
+                "source_vehicles": source_vehicles,
+                "confidence": confidence,
+                "confirmed": int(props.get("confirmed", 0)),
+                "reportedIncorrect": int(props.get("reportedIncorrect", 0)),
+                "distanceMeters": props.get("distanceMeters") if props.get("distanceMeters") is None else float(props.get("distanceMeters")),
+                "direction": props.get("direction"),
+                "recommendedAction": props.get("recommendedAction"),
+                "risk": props.get("risk"),
+                "visibilityState": props.get("visibilityState"),
+                "sourceType": props.get("sourceType"),
+                "routeRelevance": props.get("routeRelevance"),
+                "polygon": polygon,
+                "model": props.get("model"),
+                "inferenceMode": props.get("inferenceMode"),
+                "sampleId": props.get("sampleId"),
+                "lastInferenceId": props.get("lastInferenceId"),
+                "replayConfidence": props.get("replayConfidence") if props.get("replayConfidence") is None else float(props.get("replayConfidence")),
+            })
+        return result
+
     async def reset_demo_data(self) -> None:
         query = "MATCH (n:SentinelPerception {scenario_id: $scenario_id}) DETACH DELETE n"
         await self._run(query, scenario_id=SCENARIO_ID)
@@ -1578,12 +1682,16 @@ class _Neo4jGraphBackend:
         source_vehicles = sorted([r["vehicle_id"] for r in v_records])
         source_count = len(source_vehicles)
 
-        if source_count == 1:
-            confidence = 60
-        elif source_count == 2:
-            confidence = 80
+        confidence = props.get("confidence")
+        if confidence is None:
+            if source_count == 1:
+                confidence = 60
+            elif source_count == 2:
+                confidence = 80
+            else:
+                confidence = 100 if source_count >= 3 else 60
         else:
-            confidence = 100 if source_count >= 3 else 60
+            confidence = int(confidence)
 
         polygon = props.get("polygon")
         if isinstance(polygon, str):
@@ -2171,6 +2279,8 @@ WHITELIST = {
     "sampleId",
     "lastInferenceId",
     "replayConfidence",
+    "confirmed",
+    "reportedIncorrect",
 }
 
 def _validate_hazard_fields(fields: Optional[dict]) -> Optional[dict]:
@@ -2221,6 +2331,15 @@ def _validate_hazard_fields(fields: Optional[dict]) -> Optional[dict]:
                     "longitude": lon_f
                 })
             normalized[k] = normalized_poly
+
+        elif k in ("confirmed", "reportedIncorrect"):
+            if isinstance(v, bool):
+                raise ValueError(f"{k} must be an integer, not a boolean")
+            try:
+                val_i = int(v)
+            except (ValueError, TypeError):
+                raise ValueError(f"{k} must be an integer")
+            normalized[k] = val_i
 
     return normalized
 class PerceptionGraphService:
@@ -2411,6 +2530,15 @@ class PerceptionGraphService:
             self._neo4j.get_observation_hazard,
             self._memory.get_observation_hazard,
             observation_id=observation_id,
+        )
+
+    async def list_hazards(self, limit: int = 100) -> List[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
+            raise ValueError("limit must be an integer in range 1 through 100")
+        return await self._execute(
+            self._neo4j.list_hazards,
+            self._memory.list_hazards,
+            limit=limit,
         )
 
     async def find_similar_active_hazard(
