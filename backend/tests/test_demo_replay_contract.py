@@ -809,8 +809,8 @@ async def test_warning_event_true_when_perception_graph_succeeds():
     }
 
     result = await runner.process_observation(obs)
-    # With no relevant hazards → no warning events
-    assert result["_warning_events"] == []
+    assert len(result.get("_warning_events", [])) == 1
+    assert result["_warning_events"][0].startswith("warn-")
 
 
 @pytest.mark.anyio
@@ -818,6 +818,7 @@ async def test_warning_event_false_when_both_fail():
     """PATCH 3: both perception graph and Neo4j fail → warningEventCreated=false."""
     from workflows.hazard_workflow import LocalWorkflowRunner
     from services.perception_graph_service import PerceptionGraphService
+    from unittest.mock import patch, AsyncMock
 
     gs = PerceptionGraphService()
     await gs.initialize()
@@ -833,9 +834,9 @@ async def test_warning_event_false_when_both_fail():
         "vehicleLabel": "Test Vehicle",
     }
 
-    result = await runner.process_observation(obs)
-    # Both failed → no warning events
-    assert result["_warning_events"] == []
+    with patch.object(gs, "record_warning", new=AsyncMock(side_effect=RuntimeError("warning write fails"))):
+        result = await runner.process_observation(obs)
+        assert result["_warning_events"] == []
 
 
 # ====================================================================

@@ -74,6 +74,11 @@ def generate_deterministic_hazard_id(observation_id: str) -> str:
     return f"hz-{hex_digest[:12]}"
 
 
+def generate_deterministic_warning_id(hazard_id: str, observation_id: str, vehicle_id: str, language: str) -> str:
+    """Generates a deterministic and stable warning ID."""
+    return f"warn-{hazard_id}-{observation_id}-{vehicle_id}-{language}"
+
+
 class WorkflowRunner:
     async def process_observation(self, observation: dict) -> dict:
         raise NotImplementedError()
@@ -208,7 +213,29 @@ class LocalWorkflowRunner(WorkflowRunner):
                 hz_copy.get("recommendedAction", "Exercise caution")
             )
             hz_copy["warnings"] = warnings
-            hz_copy["_warning_events"] = []
+
+            # Record local warning event
+            warning_id = generate_deterministic_warning_id(
+                hazard_id=hz_copy["id"],
+                observation_id=obs_id,
+                vehicle_id=source_vehicle_id,
+                language="en"
+            )
+            try:
+                await graph_service.record_warning(
+                    warning_id=warning_id,
+                    hazard_id=hz_copy["id"],
+                    vehicle_id=source_vehicle_id,
+                    warning_text=warnings["en"],
+                    language="en",
+                    road_segment_id=hz_copy.get("segment_id"),
+                    timestamp=current_time
+                )
+                hz_copy["_warning_events"] = [warning_id]
+            except Exception as e:
+                logger.warning("Failed to record warning event: %s", type(e).__name__)
+                hz_copy["_warning_events"] = []
+
             return hz_copy
 
         # 4. Resolve Road Segment
@@ -358,6 +385,27 @@ class LocalWorkflowRunner(WorkflowRunner):
             response.get("recommendedAction", "Exercise caution")
         )
         response["warnings"] = warnings
-        response["_warning_events"] = []
+
+        # Record local warning event
+        warning_id = generate_deterministic_warning_id(
+            hazard_id=response["id"],
+            observation_id=obs_id,
+            vehicle_id=source_vehicle_id,
+            language="en"
+        )
+        try:
+            await graph_service.record_warning(
+                warning_id=warning_id,
+                hazard_id=response["id"],
+                vehicle_id=source_vehicle_id,
+                warning_text=warnings["en"],
+                language="en",
+                road_segment_id=response.get("segment_id") or road_segment_id,
+                timestamp=current_time
+            )
+            response["_warning_events"] = [warning_id]
+        except Exception as e:
+            logger.warning("Failed to record warning event: %s", type(e).__name__)
+            response["_warning_events"] = []
 
         return response
