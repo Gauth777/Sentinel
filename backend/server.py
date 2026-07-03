@@ -677,9 +677,69 @@ async def report_incorrect(hazard_id: str):
     )
 
 
+async def _cache_graph_hazard_for_legacy_reads(hazard: dict) -> None:
+    """Non-authoritative temporary read model for db.hazards compatibility.
+
+    Stores only the explicit fields needed by unmigrated legacy routes.
+    Does not persist warnings, _warning_events, source_vehicles, or observations.
+    Failure to cache does not propagate.
+    """
+    try:
+        # Extract location to GeoPoint format
+        loc = hazard.get("location")
+        geo_loc = {}
+        if isinstance(loc, dict):
+            geo_loc = {
+                "latitude": loc.get("latitude"),
+                "longitude": loc.get("longitude"),
+                "headingDegrees": loc.get("headingDegrees"),
+                "label": loc.get("label"),
+            }
+
+        # Extract polygon if present
+        poly = hazard.get("polygon")
+        geo_poly = None
+        if isinstance(poly, list):
+            geo_poly = []
+            for pt in poly:
+                if isinstance(pt, dict):
+                    geo_poly.append({
+                        "latitude": pt.get("latitude"),
+                        "longitude": pt.get("longitude"),
+                        "headingDegrees": pt.get("headingDegrees"),
+                        "label": pt.get("label"),
+                    })
+
+        cache_doc = {
+            "id": hazard["id"],
+            "type": hazard["type"],
+            "label": hazard["label"],
+            "location": geo_loc,
+            "polygon": geo_poly,
+            "distanceMeters": float(hazard.get("distanceMeters", 0.0)),
+            "confidence": int(hazard.get("confidence", 60)),
+            "sources": int(hazard.get("sources", 1)),
+            "observedSecondsAgo": int(hazard.get("observedSecondsAgo", 0)),
+            "direction": hazard.get("direction", "Northbound lane"),
+            "recommendedAction": hazard.get("recommendedAction", "Exercise caution"),
+            "risk": hazard.get("risk", "medium"),
+            "visibilityState": hazard.get("visibilityState", "hidden"),
+            "sourceType": hazard.get("sourceType", "shared_vehicle"),
+            "routeRelevance": hazard.get("routeRelevance", "medium"),
+            "confirmed": int(hazard.get("confirmed", 0)),
+            "reportedIncorrect": int(hazard.get("reportedIncorrect", 0)),
+            "status": hazard.get("status", "active"),
+            "segment_id": hazard.get("segment_id", ""),
+            "created_at": hazard.get("created_at"),
+            "updated_at": hazard.get("updated_at"),
+        }
+        await db.hazards.replace_one({"id": hazard["id"]}, cache_doc, upsert=True)
+    except Exception as e:
+        logger.warning("Cache write failed: %s", type(e).__name__)
+
+
 @api_router.post("/sentinel/demo/observation")
 async def demo_observation(req: DemoObservationRequest):
-    import time
     from workflows.hazard_workflow import LocalWorkflowRunner
     runner = LocalWorkflowRunner(
         graph_service=_perception_graph,
@@ -687,25 +747,8 @@ async def demo_observation(req: DemoObservationRequest):
     )
     res = await runner.process_observation(req.model_dump())
 
-    # Backwards-compatibility copy to MongoDB for unmigrated world model and list routes
-    try:
-        hazard_doc = dict(res)
-        hazard_doc.pop("_warning_events", None)
-        await db.hazards.replace_one({"id": res["id"]}, hazard_doc, upsert=True)
-
-        await db.observations.replace_one(
-            {"id": req.id},
-            {
-                "id": req.id,
-                "hazard_id": res["id"],
-                "vehicle_id": req.sourceVehicleId,
-                "location": {"latitude": req.location.latitude, "longitude": req.location.longitude},
-                "timestamp": res.get("updated_at", time.time())
-            },
-            upsert=True
-        )
-    except Exception as e:
-        logger.warning(f"Failed to copy to MongoDB in route: {e}")
+    # Backwards-compatibility cache update for unmigrated legacy routes
+    await _cache_graph_hazard_for_legacy_reads(res)
 
     return res
 

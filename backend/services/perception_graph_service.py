@@ -712,20 +712,24 @@ class _InMemoryGraphBackend:
                 if not hz_node or hz_node.get("type") != "Hazard" or hz_node.get("scenarioId") != SCENARIO_ID:
                     raise ValueError(f"Hazard {obs_hazard} has wrong type or scenario")
 
-                on_road_edges = [
-                    e for e in self._edges.values()
-                    if e["type"] == "ON_ROAD" and e["source"] == hazard_id and e.get("scenarioId") == SCENARIO_ID
-                ]
-                if len(on_road_edges) != 1:
+                valid_road_ids = []
+                for e in self._edges.values():
+                    if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
+                        if e.get("scenarioId") != SCENARIO_ID:
+                            continue
+                        target_id = e["target"]
+                        target_node = self._nodes.get(target_id)
+                        if target_node:
+                            if target_node.get("type") != "RoadSegment" or target_node.get("scenarioId") != SCENARIO_ID:
+                                continue
+                            valid_road_ids.append(target_id)
+
+                if len(valid_road_ids) != 1:
                     raise ValueError(f"Hazard {hazard_id} must have exactly one scenario-scoped ON_ROAD relationship")
 
-                hz_road = on_road_edges[0]["target"]
+                hz_road = valid_road_ids[0]
                 if hz_road != road_segment_id:
                     raise ValueError(f"Hazard {hazard_id} is connected to road segment {hz_road}; expected {road_segment_id}")
-
-                road_node = self._nodes.get(hz_road)
-                if not road_node or road_node.get("type") != "RoadSegment" or road_node.get("scenarioId") != SCENARIO_ID:
-                    raise ValueError(f"RoadSegment {hz_road} has wrong type or scenario")
 
                 # Verify hazard type
                 props = hz_node.get("properties", {})
@@ -748,11 +752,22 @@ class _InMemoryGraphBackend:
                 if props.get("type") != hazard_type:
                     raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; cannot upsert as {hazard_type}")
 
-                hz_road = None
+                valid_road_ids = []
                 for e in self._edges.values():
                     if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
-                        hz_road = e["target"]
-                        break
+                        if e.get("scenarioId") != SCENARIO_ID:
+                            continue
+                        target_id = e["target"]
+                        target_node = self._nodes.get(target_id)
+                        if target_node:
+                            if target_node.get("type") != "RoadSegment" or target_node.get("scenarioId") != SCENARIO_ID:
+                                continue
+                            valid_road_ids.append(target_id)
+
+                if len(valid_road_ids) != 1:
+                    raise ValueError(f"Hazard {hazard_id} must have exactly one scenario-scoped ON_ROAD relationship")
+
+                hz_road = valid_road_ids[0]
                 if hz_road != road_segment_id:
                     raise ValueError(f"Hazard {hazard_id} is already connected to road segment {hz_road}")
 
@@ -1464,34 +1479,37 @@ class _Neo4jGraphBackend:
 
         hz_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (h)-[:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment)
-        RETURN count(h) > 0 as exists, h as hazard_node, r.id as road_id
+        OPTIONAL MATCH (h)-[r_on:ON_ROAD {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
+        RETURN h as hazard_node, collect(DISTINCT r.id) as road_ids
         """
         res = await tx.run(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
         hz_record = await res.single()
-        hazard_exists = False
-        if hz_record:
-            hazard_exists = hz_record["exists"]
-            if hazard_exists:
-                h_node = hz_record["hazard_node"]
-                road_id = hz_record["road_id"]
+        hazard_exists = hz_record is not None and hz_record["hazard_node"] is not None
+        if hazard_exists:
+            h_node = hz_record["hazard_node"]
+            road_ids = [rid for rid in hz_record["road_ids"] if rid is not None]
 
-                props = dict(h_node)
-                if props.get("type") != hazard_type:
-                    raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; cannot upsert as {hazard_type}")
-                if road_id and road_id != road_segment_id:
-                    raise ValueError(f"Hazard {hazard_id} is already connected to road segment {road_id}")
+            if len(road_ids) != 1:
+                raise ValueError(f"Hazard {hazard_id} must have exactly one scenario-scoped ON_ROAD relationship")
 
-                if hazard_fields and "risk" in hazard_fields and hazard_fields["risk"] is not None:
-                    existing_risk = props.get("risk")
-                    new_risk = hazard_fields["risk"]
-                    if existing_risk in RISK_LEVELS:
-                        if RISK_LEVELS[new_risk] < RISK_LEVELS[existing_risk]:
-                            raise ValueError(f"Cannot decrease risk level from {existing_risk} to {new_risk}")
+            road_id = road_ids[0]
+            if road_id != road_segment_id:
+                raise ValueError(f"Hazard {hazard_id} is already connected to road segment {road_id}")
 
-                if hazard_fields and "status" in hazard_fields and hazard_fields["status"] == "active":
-                    if props.get("status") == "resolved":
-                        raise ValueError("Cannot change hazard status from resolved back to active")
+            props = dict(h_node)
+            if props.get("type") != hazard_type:
+                raise ValueError(f"Hazard {hazard_id} exists with type {props.get('type')}; cannot upsert as {hazard_type}")
+
+            if hazard_fields and "risk" in hazard_fields and hazard_fields["risk"] is not None:
+                existing_risk = props.get("risk")
+                new_risk = hazard_fields["risk"]
+                if existing_risk in RISK_LEVELS:
+                    if RISK_LEVELS[new_risk] < RISK_LEVELS[existing_risk]:
+                        raise ValueError(f"Cannot decrease risk level from {existing_risk} to {new_risk}")
+
+            if hazard_fields and "status" in hazard_fields and hazard_fields["status"] == "active":
+                if props.get("status") == "resolved":
+                    raise ValueError("Cannot change hazard status from resolved back to active")
 
         hazard_created = not hazard_exists
         observation_created = not obs_exists

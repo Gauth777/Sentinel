@@ -158,7 +158,36 @@ class LocalWorkflowRunner(WorkflowRunner):
                 if p_lon is None or isinstance(p_lon, bool) or not isinstance(p_lon, (int, float)) or not math.isfinite(p_lon) or p_lon < -180.0 or p_lon > 180.0:
                     raise ValueError("Polygon point longitude must be a finite number between -180 and 180.")
 
-        # 3. Idempotency Check via PerceptionGraphService
+        # 3. Validate _replay_meta before any graph call
+        replay_meta = obs.get("_replay_meta")
+        if replay_meta is not None:
+            if not isinstance(replay_meta, dict):
+                raise ValueError("_replay_meta must be a dictionary or None.")
+
+            # String fields when present and non-None
+            str_fields = ["recommendedAction", "model", "inferenceMode", "sampleId", "lastInferenceId"]
+            for field in str_fields:
+                if field in replay_meta:
+                    val = replay_meta[field]
+                    if val is not None:
+                        if not isinstance(val, str) or not val.strip():
+                            raise ValueError(f"Replay metadata {field} must be a non-empty string.")
+
+            # risk when present and non-None
+            if "risk" in replay_meta:
+                risk_val = replay_meta["risk"]
+                if risk_val is not None:
+                    if risk_val not in ("low", "medium", "high"):
+                        raise ValueError("Replay metadata risk must be 'low', 'medium', or 'high'.")
+
+            # confidence when present and non-None
+            if "confidence" in replay_meta:
+                conf_val = replay_meta["confidence"]
+                if conf_val is not None:
+                    if isinstance(conf_val, bool) or not isinstance(conf_val, (int, float)) or not math.isfinite(conf_val):
+                        raise ValueError("Replay metadata confidence must be a finite number.")
+
+        # 4. Idempotency Check via PerceptionGraphService
         existing_hz = await graph_service.get_observation_hazard(obs_id)
         current_time = time.time()
         if existing_hz:
@@ -286,13 +315,22 @@ class LocalWorkflowRunner(WorkflowRunner):
                     hazard_fields[key] = matched_hazard[key]
 
         # 8. Graph Authoritative Write
+        if matched_hazard:
+            existing_label = matched_hazard.get("label")
+            if existing_label and isinstance(existing_label, str) and existing_label.strip():
+                upsert_hazard_label = existing_label
+            else:
+                upsert_hazard_label = label
+        else:
+            upsert_hazard_label = label
+
         upsert_res = await graph_service.upsert_observation_and_hazard(
             observation_id=obs_id,
             vehicle_id=source_vehicle_id,
             vehicle_label=vehicle_label,
             hazard_id=selected_hazard_id,
             hazard_type=obs_type,
-            hazard_label=label,
+            hazard_label=upsert_hazard_label,
             latitude=lat,
             longitude=lon,
             road_segment_id=road_segment_id,
