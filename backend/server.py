@@ -466,7 +466,8 @@ async def _seed_demo_graph_vehicles() -> None:
                 road_segment_name="GST Road Northbound",
             )
         except Exception as e:
-            logger.warning(f"Failed to seed demo graph vehicle {v['id']}: {type(e).__name__}")
+            logger.error(f"Demo graph vehicle seeding failed: {type(e).__name__}")
+            raise RuntimeError("Demo graph vehicle seeding failed") from None
 
 
 # ======================= App =======================
@@ -773,7 +774,11 @@ async def demo_reset():
         await _perception_graph.reset_demo_data()
         await _seed_demo_graph_vehicles()
     except Exception as e:
-        logger.warning(f"PerceptionGraphService reset/seeding failed: {type(e).__name__}")
+        logger.error(f"PerceptionGraphService reset/seeding failed: {type(e).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail="Demo reset failed due to graph database error"
+        )
     await db.hazards.delete_many({})
     await db.observations.delete_many({})
     await db.sentinel_meta.delete_many({})
