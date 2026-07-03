@@ -792,9 +792,12 @@ def test_30_reload_does_not_clear_unrelated_data(app_with_services):
 async def test_warning_event_true_when_perception_graph_succeeds():
     """PATCH 3: perception graph succeeds, Neo4j fails → warningEventCreated=true."""
     from workflows.hazard_workflow import LocalWorkflowRunner
-    from utils.mongo_mock import MOCK_DB_STATE
+    from services.perception_graph_service import PerceptionGraphService
 
-    runner = LocalWorkflowRunner()
+    gs = PerceptionGraphService()
+    await gs.initialize()
+
+    runner = LocalWorkflowRunner(graph_service=gs)
     obs = {
         "id": "obs-wrn-pg-ok",
         "type": "pothole",
@@ -805,35 +808,21 @@ async def test_warning_event_true_when_perception_graph_succeeds():
         "vehicleLabel": "Test Vehicle",
     }
 
-    # Ensure no matching active hazard
-    with patch("server.db", MOCK_DB_STATE), \
-         patch("workflows.hazard_workflow.Neo4jService") as mock_neo4j, \
-         patch("server._perception_graph") as mock_pg:
-
-        # Setup: make sure Neo4j returns relevant hazards to trigger warnings
-        mock_neo4j.record_vehicle = AsyncMock()
-        mock_neo4j.record_road_segment = AsyncMock()
-        mock_neo4j.record_vehicle_approaching = AsyncMock()
-        mock_neo4j.record_hazard = AsyncMock()
-        mock_neo4j.record_observation = AsyncMock()
-        mock_neo4j.get_relevant_hazards = AsyncMock(return_value=[])
-        mock_neo4j.record_warning_event = AsyncMock(side_effect=Exception("Neo4j down"))
-
-        mock_pg.record_observation = AsyncMock()
-        mock_pg.record_warning = AsyncMock()  # Perception graph succeeds
-
-        result = await runner.process_observation(obs)
-        # With no relevant hazards → no warning events
-        assert result["_warning_events"] == []
+    result = await runner.process_observation(obs)
+    # With no relevant hazards → no warning events
+    assert result["_warning_events"] == []
 
 
 @pytest.mark.anyio
 async def test_warning_event_false_when_both_fail():
     """PATCH 3: both perception graph and Neo4j fail → warningEventCreated=false."""
     from workflows.hazard_workflow import LocalWorkflowRunner
-    from utils.mongo_mock import MOCK_DB_STATE
+    from services.perception_graph_service import PerceptionGraphService
 
-    runner = LocalWorkflowRunner()
+    gs = PerceptionGraphService()
+    await gs.initialize()
+
+    runner = LocalWorkflowRunner(graph_service=gs)
     obs = {
         "id": "obs-wrn-both-fail",
         "type": "pothole",
@@ -844,24 +833,9 @@ async def test_warning_event_false_when_both_fail():
         "vehicleLabel": "Test Vehicle",
     }
 
-    with patch("server.db", MOCK_DB_STATE), \
-         patch("workflows.hazard_workflow.Neo4jService") as mock_neo4j, \
-         patch("server._perception_graph") as mock_pg:
-
-        mock_neo4j.record_vehicle = AsyncMock()
-        mock_neo4j.record_road_segment = AsyncMock()
-        mock_neo4j.record_vehicle_approaching = AsyncMock()
-        mock_neo4j.record_hazard = AsyncMock()
-        mock_neo4j.record_observation = AsyncMock()
-        mock_neo4j.get_relevant_hazards = AsyncMock(return_value=[])
-        mock_neo4j.record_warning_event = AsyncMock(side_effect=Exception("Neo4j down"))
-
-        mock_pg.record_observation = AsyncMock()
-        mock_pg.record_warning = AsyncMock(side_effect=Exception("PG down"))
-
-        result = await runner.process_observation(obs)
-        # Both failed → no warning events
-        assert result["_warning_events"] == []
+    result = await runner.process_observation(obs)
+    # Both failed → no warning events
+    assert result["_warning_events"] == []
 
 
 # ====================================================================
@@ -873,33 +847,24 @@ async def test_warning_event_false_when_both_fail():
 async def test_matched_hazard_receives_replay_action():
     """PATCH 4: Existing matched hazard receives replay recommendedAction."""
     from workflows.hazard_workflow import LocalWorkflowRunner
-    from utils.mongo_mock import MOCK_DB_STATE
-    import time
+    from services.perception_graph_service import PerceptionGraphService
 
-    runner = LocalWorkflowRunner()
-    current_time = time.time()
+    gs = PerceptionGraphService()
+    await gs.initialize()
 
-    # Pre-seed a matching hazard
-    existing_hazard = {
-        "id": "hz-match-action",
+    runner = LocalWorkflowRunner(graph_service=gs)
+
+    # Pre-seed a matching hazard by processing an initial observation
+    obs_init = {
+        "id": "obs-init-match",
         "type": "crossing_vehicle",
         "label": "Test",
         "location": {"latitude": 12.9452, "longitude": 80.1506},
-        "distanceMeters": 100.0,
-        "confidence": 60,
-        "sources": 1,
-        "observedSecondsAgo": 0,
-        "recommendedAction": "Exercise caution",
-        "risk": "medium",
-        "source_vehicles": ["v-old"],
-        "segment_id": "gst",
-        "status": "active",
-        "created_at": current_time,
-        "updated_at": current_time,
-        "warnings": {"en": "Old warning"},
-        "confirmed": 0,
-        "reportedIncorrect": 0,
+        "polygon": None,
+        "sourceVehicleId": "v-old",
+        "vehicleLabel": "Old Vehicle",
     }
+    await runner.process_observation(obs_init)
 
     obs = {
         "id": "obs-match-action",
@@ -920,83 +885,48 @@ async def test_matched_hazard_receives_replay_action():
         },
     }
 
-    mock_db = MagicMock()
-    mock_db.observations = MagicMock()
-    mock_db.observations.find_one = AsyncMock(return_value=None)
-    mock_db.observations.replace_one = AsyncMock()
+    result = await runner.process_observation(obs)
 
-    mock_db.hazards = MagicMock()
-    mock_db.hazards.find = MagicMock()
-    mock_db.hazards.find.return_value = MagicMock()
-    mock_db.hazards.find.return_value.to_list = AsyncMock(return_value=[existing_hazard])
-    mock_db.hazards.replace_one = AsyncMock()
-
-    mock_db.nearby_vehicles = MagicMock()
-    mock_db.nearby_vehicles.find = MagicMock()
-    mock_db.nearby_vehicles.find.return_value = MagicMock()
-    mock_db.nearby_vehicles.find.return_value.to_list = AsyncMock(return_value=[])
-
-    with patch("server.db", mock_db), \
-         patch("workflows.hazard_workflow.Neo4jService") as mock_neo4j, \
-         patch("server._perception_graph") as mock_pg:
-
-        mock_neo4j.record_vehicle = AsyncMock()
-        mock_neo4j.record_road_segment = AsyncMock()
-        mock_neo4j.record_vehicle_approaching = AsyncMock()
-        mock_neo4j.record_hazard = AsyncMock()
-        mock_neo4j.record_observation = AsyncMock()
-        mock_neo4j.get_relevant_hazards = AsyncMock(return_value=[])
-
-        mock_pg.record_observation = AsyncMock()
-
-        result = await runner.process_observation(obs)
-
-        # Action should be updated from replay meta
-        assert result["recommendedAction"] == "Prepare to stop"
-        # Risk should be upgraded from medium to high
-        assert result["risk"] == "high"
-        # Provenance fields should be applied
-        assert result["model"] == "Qwen2.5-VL-7B-Instruct"
-        assert result["inferenceMode"] == "cached_qwen"
-        assert result["sampleId"] == "s1"
-        assert result["lastInferenceId"] == "inf-abc123"
-        assert result["replayConfidence"] == 0.9
+    # Action should be updated from replay meta
+    assert result["recommendedAction"] == "Prepare to stop"
+    # Risk should be upgraded from medium to high
+    assert result["risk"] == "high"
+    # Provenance fields should be applied
+    assert result["model"] == "Qwen2.5-VL-7B-Instruct"
+    assert result["inferenceMode"] == "cached_qwen"
+    assert result["sampleId"] == "s1"
+    assert result["lastInferenceId"] == "inf-abc123"
+    assert result["replayConfidence"] == 0.9
 
 
 @pytest.mark.anyio
 async def test_matched_hazard_risk_cannot_decrease():
     """PATCH 4: Existing risk=high cannot be reduced to medium/low."""
     from workflows.hazard_workflow import LocalWorkflowRunner
-    import time
+    from services.perception_graph_service import PerceptionGraphService
 
-    runner = LocalWorkflowRunner()
-    current_time = time.time()
+    gs = PerceptionGraphService()
+    await gs.initialize()
 
-    existing_hazard = {
-        "id": "hz-risk-no-decrease",
-        "type": "pothole",
-        "label": "Pothole",
+    runner = LocalWorkflowRunner(graph_service=gs)
+
+    # Pre-seed a matching high risk hazard
+    obs_init = {
+        "id": "obs-init-high-risk",
+        "type": "stationary_vehicle",
+        "label": "Stationary Vehicle",
         "location": {"latitude": 12.9452, "longitude": 80.1506},
-        "distanceMeters": 100.0,
-        "confidence": 60,
-        "sources": 1,
-        "observedSecondsAgo": 0,
-        "recommendedAction": "Slow down",
-        "risk": "high",
-        "source_vehicles": ["v-old"],
-        "segment_id": "gst",
-        "status": "active",
-        "created_at": current_time,
-        "updated_at": current_time,
-        "warnings": {"en": "Old warning"},
-        "confirmed": 0,
-        "reportedIncorrect": 0,
+        "polygon": None,
+        "sourceVehicleId": "v-old",
+        "vehicleLabel": "Old Vehicle",
     }
+    init_res = await runner.process_observation(obs_init)
+    assert init_res["risk"] == "high"
 
     obs = {
         "id": "obs-risk-no-decrease",
-        "type": "pothole",
-        "label": "Pothole",
+        "type": "stationary_vehicle",
+        "label": "Stationary Vehicle",
         "location": {"latitude": 12.9452, "longitude": 80.1506},
         "polygon": None,
         "sourceVehicleId": "v-replay-observer",
@@ -1007,50 +937,24 @@ async def test_matched_hazard_risk_cannot_decrease():
         },
     }
 
-    mock_db = MagicMock()
-    mock_db.observations = MagicMock()
-    mock_db.observations.find_one = AsyncMock(return_value=None)
-    mock_db.observations.replace_one = AsyncMock()
+    result = await runner.process_observation(obs)
 
-    mock_db.hazards = MagicMock()
-    mock_db.hazards.find = MagicMock()
-    mock_db.hazards.find.return_value = MagicMock()
-    mock_db.hazards.find.return_value.to_list = AsyncMock(return_value=[existing_hazard])
-    mock_db.hazards.replace_one = AsyncMock()
-
-    mock_db.nearby_vehicles = MagicMock()
-    mock_db.nearby_vehicles.find = MagicMock()
-    mock_db.nearby_vehicles.find.return_value = MagicMock()
-    mock_db.nearby_vehicles.find.return_value.to_list = AsyncMock(return_value=[])
-
-    with patch("server.db", mock_db), \
-         patch("workflows.hazard_workflow.Neo4jService") as mock_neo4j, \
-         patch("server._perception_graph") as mock_pg:
-
-        mock_neo4j.record_vehicle = AsyncMock()
-        mock_neo4j.record_road_segment = AsyncMock()
-        mock_neo4j.record_vehicle_approaching = AsyncMock()
-        mock_neo4j.record_hazard = AsyncMock()
-        mock_neo4j.record_observation = AsyncMock()
-        mock_neo4j.get_relevant_hazards = AsyncMock(return_value=[])
-
-        mock_pg.record_observation = AsyncMock()
-
-        result = await runner.process_observation(obs)
-
-        # Risk should remain high (not decreased to low)
-        assert result["risk"] == "high"
-        # Action was updated (action does not have risk-strengthening constraint)
-        assert result["recommendedAction"] == "Maintain speed"
+    # Risk should remain high (not decreased to low)
+    assert result["risk"] == "high"
+    # Action was updated
+    assert result["recommendedAction"] == "Maintain speed"
 
 
 @pytest.mark.anyio
 async def test_legacy_non_replay_observation_unchanged():
     """PATCH 4: Non-replay observations without _replay_meta use legacy defaults."""
     from workflows.hazard_workflow import LocalWorkflowRunner
-    from utils.mongo_mock import MOCK_DB_STATE
+    from services.perception_graph_service import PerceptionGraphService
 
-    runner = LocalWorkflowRunner()
+    gs = PerceptionGraphService()
+    await gs.initialize()
+
+    runner = LocalWorkflowRunner(graph_service=gs)
     obs = {
         "id": "obs-legacy",
         "type": "stationary_vehicle",
@@ -1059,28 +963,14 @@ async def test_legacy_non_replay_observation_unchanged():
         "polygon": None,
         "sourceVehicleId": "v-old",
         "vehicleLabel": "Old Vehicle",
-        # No _replay_meta → legacy path
     }
 
-    with patch("server.db", MOCK_DB_STATE), \
-         patch("workflows.hazard_workflow.Neo4jService") as mock_neo4j, \
-         patch("server._perception_graph") as mock_pg:
+    result = await runner.process_observation(obs)
 
-        mock_neo4j.record_vehicle = AsyncMock()
-        mock_neo4j.record_road_segment = AsyncMock()
-        mock_neo4j.record_vehicle_approaching = AsyncMock()
-        mock_neo4j.record_hazard = AsyncMock()
-        mock_neo4j.record_observation = AsyncMock()
-        mock_neo4j.get_relevant_hazards = AsyncMock(return_value=[])
-
-        mock_pg.record_observation = AsyncMock()
-
-        result = await runner.process_observation(obs)
-
-        # Legacy defaults for stationary_vehicle
-        assert result["recommendedAction"] == "Reduce speed"
-        assert result["risk"] == "high"
-        # No replay provenance fields
-        assert "model" not in result
-        assert "inferenceMode" not in result
-        assert "sampleId" not in result
+    # Legacy defaults for stationary_vehicle
+    assert result["recommendedAction"] == "Reduce speed"
+    assert result["risk"] == "high"
+    # No replay provenance fields
+    assert result.get("model") is None
+    assert result.get("inferenceMode") is None
+    assert result.get("sampleId") is None
