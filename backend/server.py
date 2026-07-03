@@ -679,9 +679,34 @@ async def report_incorrect(hazard_id: str):
 
 @api_router.post("/sentinel/demo/observation")
 async def demo_observation(req: DemoObservationRequest):
+    import time
     from workflows.hazard_workflow import LocalWorkflowRunner
-    runner = LocalWorkflowRunner()
+    runner = LocalWorkflowRunner(
+        graph_service=_perception_graph,
+        ego_location=EGO,
+    )
     res = await runner.process_observation(req.model_dump())
+
+    # Backwards-compatibility copy to MongoDB for unmigrated world model and list routes
+    try:
+        hazard_doc = dict(res)
+        hazard_doc.pop("_warning_events", None)
+        await db.hazards.replace_one({"id": res["id"]}, hazard_doc, upsert=True)
+
+        await db.observations.replace_one(
+            {"id": req.id},
+            {
+                "id": req.id,
+                "hazard_id": res["id"],
+                "vehicle_id": req.sourceVehicleId,
+                "location": {"latitude": req.location.latitude, "longitude": req.location.longitude},
+                "timestamp": res.get("updated_at", time.time())
+            },
+            upsert=True
+        )
+    except Exception as e:
+        logger.warning(f"Failed to copy to MongoDB in route: {e}")
+
     return res
 
 
