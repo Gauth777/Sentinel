@@ -420,24 +420,32 @@ async def test_neo4j_warning_retry_and_conflicts():
     mock_driver.result_queue.append([{"exists": True}])
     # Vehicle exists
     mock_driver.result_queue.append([{"exists": True}])
-    # Warning merge returns text, lang, road segment
+    # Warning exists check returns warning properties
     mock_driver.result_queue.append([{
         "text": "Pothole ahead",
         "language": "en",
-        "roadSegmentId": None
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
     }])
-    # rel_check returns hazard_ids, vehicle_ids matching current
+    # match_tw check -> count 1, hazard ID hz-1
     mock_driver.result_queue.append([{
-        "hazard_ids": ["hz-1"],
+        "rel_count": 1,
+        "hazard_ids": ["hz-1"]
+    }])
+    # match_dt check -> count 1, vehicle ID v-A
+    mock_driver.result_queue.append([{
+        "rel_count": 1,
         "vehicle_ids": ["v-A"]
     }])
 
-    # Call record_warning: should complete without calling CREATE queries
+    # Call record_warning: should complete without calling CREATE/MERGE queries for relationships
     await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
 
-    # Verify no CREATE statements were run
+    # Verify no CREATE/MERGE relationship statements were run
     for q, p in mock_driver.queries:
-        assert "CREATE (" not in q.upper()
+        if "MERGE (h)-[:TRIGGERED_WARNING" in q:
+            raise AssertionError("Relationship MERGE query was run on exact retry")
 
     # --- Case B: Conflicts ---
     # Same warning ID but conflicting properties
@@ -446,11 +454,13 @@ async def test_neo4j_warning_retry_and_conflicts():
     mock_driver.result_queue.append([{"exists": True}])
     # Vehicle exists
     mock_driver.result_queue.append([{"exists": True}])
-    # Warning merge returns different text
+    # Warning exists check returns different text
     mock_driver.result_queue.append([{
         "text": "Different text",
         "language": "en",
-        "roadSegmentId": None
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
     }])
 
     with pytest.raises(ValueError, match="properties conflict"):
@@ -651,3 +661,458 @@ async def test_workflow_peer_delivery_integration():
         expected_source2 = f"warn-{hz2_id}-obs-wf-2-v-A-en"
         expected_c2 = f"warn-{hz2_id}-obs-wf-2-v-C-en"
         assert res2["_warning_events"] == [expected_source2, expected_c2]
+
+
+# ============================================================================
+# 6. Stage B2B final integrity regression tests
+# ============================================================================
+
+@pytest.mark.anyio
+async def test_neo4j_concurrent_exact_warning_retries():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    # First call:
+    mock_driver.result_queue.append([{"exists": True}]) # Hazard
+    mock_driver.result_queue.append([{"exists": True}]) # Vehicle
+    mock_driver.result_queue.append([])                 # Warning not exists check
+    mock_driver.result_queue.append([{                  # Warning merge return
+        "text": "Pothole ahead",
+        "language": "en",
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
+    }])
+    mock_driver.result_queue.append([])                 # rel merge query execution
+
+    # Second call:
+    mock_driver.result_queue.append([{"exists": True}]) # Hazard
+    mock_driver.result_queue.append([{"exists": True}]) # Vehicle
+    mock_driver.result_queue.append([{                  # Warning exists!
+        "text": "Pothole ahead",
+        "language": "en",
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
+    }])
+    mock_driver.result_queue.append([{                  # TRIGGERED_WARNING check
+        "rel_count": 1,
+        "hazard_ids": ["hz-1"]
+    }])
+    mock_driver.result_queue.append([{                  # DELIVERED_TO check
+        "rel_count": 1,
+        "vehicle_ids": ["v-A"]
+    }])
+
+    # Run calls
+    await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+    await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+
+    # Verify MERGE query for relationship ran only once
+    merge_rel_queries = [q for q, p in mock_driver.queries if "MERGE (h)-[:TRIGGERED_WARNING" in q]
+    assert len(merge_rel_queries) == 1
+
+
+@pytest.mark.anyio
+async def test_neo4j_concurrent_warning_different_hazard_rejected():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{
+        "text": "Pothole ahead",
+        "language": "en",
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
+    }])
+
+    with pytest.raises(ValueError, match="Warning ownership conflicts|properties conflict"):
+        await svc.record_warning("wrn-1", "hz-2", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_memory_warning_different_hazard_rejected():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+    await svc.record_observation("obs-2", "v-A", "Vehicle A", "hz-2", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+
+    await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+
+    with pytest.raises(ValueError, match="Warning ownership conflicts"):
+        await svc.record_warning("wrn-1", "hz-2", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_neo4j_concurrent_warning_different_vehicle_rejected():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{
+        "text": "Pothole ahead",
+        "language": "en",
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
+    }])
+
+    with pytest.raises(ValueError, match="Warning ownership conflicts|properties conflict"):
+        await svc.record_warning("wrn-1", "hz-1", "v-B", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_memory_warning_different_vehicle_rejected():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+    await svc.upsert_vehicle_approach("v-B", "Vehicle B", "gst", "GST Road Northbound")
+
+    await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+
+    with pytest.raises(ValueError, match="Warning ownership conflicts"):
+        await svc.record_warning("wrn-1", "hz-1", "v-B", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_warning_node_stores_ownership_properties():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+    await svc.record_warning("wrn-1", "hz-1", "v-A", "Pothole ahead", "en")
+
+    node = svc._memory._nodes.get("wrn-1")
+    assert node is not None
+    props = node.get("properties", {})
+    assert props.get("hazardId") == "hz-1"
+    assert props.get("vehicleId") == "v-A"
+
+
+@pytest.mark.anyio
+async def test_orphan_warning_rejected_on_retry():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+
+    svc._memory._nodes["wrn-orphan"] = {
+        "id": "wrn-orphan",
+        "type": "Warning",
+        "name": "Warning wrn-orphan",
+        "properties": {
+            "text": "Pothole ahead",
+            "language": "en",
+            "roadSegmentId": None,
+            "hazardId": "hz-1",
+            "vehicleId": "v-A"
+        },
+        "scenarioId": SCENARIO_ID
+    }
+
+    with pytest.raises(ValueError, match="matching TRIGGERED_WARNING relationship"):
+        await svc.record_warning("wrn-orphan", "hz-1", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_warning_missing_triggered_warning_rejected():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+
+    svc._memory._nodes["wrn-test"] = {
+        "id": "wrn-test",
+        "type": "Warning",
+        "name": "Warning wrn-test",
+        "properties": {
+            "text": "Pothole ahead",
+            "language": "en",
+            "roadSegmentId": None,
+            "hazardId": "hz-1",
+            "vehicleId": "v-A"
+        },
+        "scenarioId": SCENARIO_ID
+    }
+    svc._memory._merge_edge_sync("DELIVERED_TO:wrn-test:v-A", "DELIVERED_TO", "wrn-test", "v-A", {})
+
+    with pytest.raises(ValueError, match="matching TRIGGERED_WARNING relationship"):
+        await svc.record_warning("wrn-test", "hz-1", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_warning_missing_delivered_to_rejected():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+
+    svc._memory._nodes["wrn-test"] = {
+        "id": "wrn-test",
+        "type": "Warning",
+        "name": "Warning wrn-test",
+        "properties": {
+            "text": "Pothole ahead",
+            "language": "en",
+            "roadSegmentId": None,
+            "hazardId": "hz-1",
+            "vehicleId": "v-A"
+        },
+        "scenarioId": SCENARIO_ID
+    }
+    svc._memory._merge_edge_sync("TRIGGERED_WARNING:hz-1:wrn-test", "TRIGGERED_WARNING", "hz-1", "wrn-test", {})
+
+    with pytest.raises(ValueError, match="matching DELIVERED_TO relationship"):
+        await svc.record_warning("wrn-test", "hz-1", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_warning_missing_approaching_rejected():
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    await svc.record_observation("obs-1", "v-A", "Vehicle A", "hz-1", "pothole", "Pothole", "gst", "GST Road Northbound", 100.0)
+
+    svc._memory._nodes["wrn-test"] = {
+        "id": "wrn-test",
+        "type": "Warning",
+        "name": "Warning wrn-test",
+        "properties": {
+            "text": "Pothole ahead",
+            "language": "en",
+            "roadSegmentId": "gst",
+            "hazardId": "hz-1",
+            "vehicleId": "v-A"
+        },
+        "scenarioId": SCENARIO_ID
+    }
+    svc._memory._merge_edge_sync("TRIGGERED_WARNING:hz-1:wrn-test", "TRIGGERED_WARNING", "hz-1", "wrn-test", {})
+    svc._memory._merge_edge_sync("DELIVERED_TO:wrn-test:v-A", "DELIVERED_TO", "wrn-test", "v-A", {})
+    svc._memory._edges.pop("APPROACHING:v-A:gst", None)
+
+    with pytest.raises(ValueError, match="matching APPROACHING relationship"):
+        await svc.record_warning("wrn-test", "hz-1", "v-A", "Pothole ahead", "en", road_segment_id="gst")
+
+
+@pytest.mark.anyio
+async def test_neo4j_orphan_warning_rejected():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{"exists": True}])
+    mock_driver.result_queue.append([{
+        "text": "Pothole ahead",
+        "language": "en",
+        "roadSegmentId": None,
+        "hazardId": "hz-1",
+        "vehicleId": "v-A"
+    }])
+    mock_driver.result_queue.append([{
+        "rel_count": 0,
+        "hazard_ids": []
+    }])
+
+    with pytest.raises(ValueError, match="TRIGGERED_WARNING relationship"):
+        await svc.record_warning("wrn-orphan", "hz-1", "v-A", "Pothole ahead", "en")
+
+
+@pytest.mark.anyio
+async def test_neo4j_unrelated_non_sentinel_node_does_not_block_seeding():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([])
+    mock_driver.result_queue.append([])
+
+    await svc.upsert_vehicle_approach("v-unrelated", "Vehicle", "road-unrelated", "Road")
+
+    v_queries = [q for q, p in mock_driver.queries if "MATCH (n:SentinelPerception" in q]
+    assert len(v_queries) == 2
+
+
+@pytest.mark.anyio
+async def test_neo4j_wrong_type_sentinel_node_blocks_seeding():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{
+        "labels": ["Hazard", "SentinelPerception"],
+        "scenario_id": SCENARIO_ID
+    }])
+
+    with pytest.raises(ValueError, match="conflicting SentinelPerception node"):
+        await svc.upsert_vehicle_approach("v-wrong", "Vehicle", "road-1", "Road 1")
+
+
+@pytest.mark.anyio
+async def test_neo4j_wrong_scenario_sentinel_node_blocks_seeding():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    mock_driver.result_queue.append([{
+        "labels": ["Vehicle", "SentinelPerception"],
+        "scenario_id": "wrong-scenario-id"
+    }])
+
+    with pytest.raises(ValueError, match="conflicting SentinelPerception node"):
+        await svc.upsert_vehicle_approach("v-wrong", "Vehicle", "road-1", "Road 1")
+
+
+@pytest.mark.anyio
+async def test_neo4j_recipient_lookup_failure_does_not_switch_mode():
+    svc = PerceptionGraphService()
+    mock_driver = MockNeo4jDriver()
+    svc._neo4j._driver = mock_driver
+    svc._neo4j._database = "neo4j"
+    svc._mode = "neo4j"
+    svc._neo4j_connected = True
+
+    async def mock_run_read(*args, **kwargs):
+        raise RuntimeError("Neo4j read query failure")
+
+    with patch.object(svc._neo4j, "_run_read", new=mock_run_read):
+        with pytest.raises(RuntimeError, match="Neo4j recipient lookup failed"):
+            await svc.get_warning_recipient_vehicle_ids("hz-1", "v-1")
+
+        assert svc._mode == "neo4j"
+
+
+@pytest.mark.anyio
+async def test_workflow_no_peers_returns_only_local_warning():
+    from workflows.hazard_workflow import LocalWorkflowRunner
+
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    runner = LocalWorkflowRunner(graph_service=svc, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-wf-no-peers",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-A",
+        "vehicleLabel": "Vehicle A"
+    }
+
+    res = await runner.process_observation(obs)
+    warning_events = res.get("_warning_events", [])
+    assert len(warning_events) == 1
+    assert warning_events[0].endswith("-v-A-en")
+
+
+@pytest.mark.anyio
+async def test_workflow_recipient_lookup_failure_fallback_to_local_warning():
+    from workflows.hazard_workflow import LocalWorkflowRunner
+
+    svc = PerceptionGraphService()
+    await svc.initialize()
+
+    async def mock_lookup(*args, **kwargs):
+        raise RuntimeError("Lookup failed")
+
+    runner = LocalWorkflowRunner(graph_service=svc, ego_location={"latitude": 12.9436, "longitude": 80.1502})
+    obs = {
+        "id": "obs-wf-lookup-fail",
+        "type": "pothole",
+        "label": "Pothole",
+        "location": {"latitude": 12.9450, "longitude": 80.1503},
+        "sourceVehicleId": "v-A",
+        "vehicleLabel": "Vehicle A"
+    }
+
+    with patch.object(svc, "get_warning_recipient_vehicle_ids", new=mock_lookup):
+        res = await runner.process_observation(obs)
+        warning_events = res.get("_warning_events", [])
+        assert len(warning_events) == 1
+        assert warning_events[0].endswith("-v-A-en")
+
+
+@pytest.mark.anyio
+async def test_startup_seeding_failure_propagates():
+    from server import _seed_demo_graph_vehicles, _perception_graph
+
+    async def mock_upsert(*args, **kwargs):
+        raise ValueError("Neo4j insertion failed")
+
+    with patch.object(_perception_graph, "upsert_vehicle_approach", new=mock_upsert):
+        with pytest.raises(RuntimeError, match="Demo graph vehicle seeding failed"):
+            await _seed_demo_graph_vehicles()
+
+
+def test_reset_seeding_failure_returns_sanitized_503():
+    from fastapi.testclient import TestClient
+    from server import app, _perception_graph
+
+    call_count = 0
+    async def mock_upsert(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 4:
+            raise ValueError("Database offline")
+        return None
+
+    with patch.object(_perception_graph, "upsert_vehicle_approach", new=mock_upsert):
+        with TestClient(app) as tc:
+            response = tc.post("/api/sentinel/demo/reset")
+            assert response.status_code == 503
+            assert "Database offline" not in response.text
+            assert "Demo reset failed due to graph database error" in response.text
+
+
+def test_successful_reset_restores_all_four_vehicles():
+    from fastapi.testclient import TestClient
+    from server import app, _perception_graph
+
+    calls = []
+    orig_upsert = _perception_graph.upsert_vehicle_approach
+    async def mock_upsert(*args, **kwargs):
+        calls.append(kwargs)
+        return await orig_upsert(*args, **kwargs)
+
+    with patch.object(_perception_graph, "upsert_vehicle_approach", new=mock_upsert):
+        with TestClient(app) as tc:
+            calls.clear() # Clear startup calls
+            with patch("server.db.hazards.delete_many", new=AsyncMock()), \
+                 patch("server.db.observations.delete_many", new=AsyncMock()), \
+                 patch("server.db.sentinel_meta.delete_many", new=AsyncMock()), \
+                 patch("server.ensure_seed", new=AsyncMock()):
+                response = tc.post("/api/sentinel/demo/reset")
+                assert response.status_code == 200
+
+            assert len(calls) == 4
+            seeded_ids = sorted([c["vehicle_id"] for c in calls])
+            assert seeded_ids == ["v-1", "v-2", "v-3", "v-4"]

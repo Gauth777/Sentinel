@@ -330,7 +330,7 @@ class _InMemoryGraphBackend:
                 if not r_node or r_node.get("type") != "RoadSegment" or r_node.get("scenarioId") != SCENARIO_ID:
                     raise ValueError(f"RoadSegment node {road_segment_id} does not exist or has incorrect type/scenario")
 
-            # 3. IMMUTABLE IDEMPOTENCY
+            # 3. IMMUTABLE IDEMPOTENCY & RELATIONSHIP INTEGRITY
             existing_warn = self._nodes.get(warning_id)
             if existing_warn:
                 if existing_warn.get("type") != "Warning" or existing_warn.get("scenarioId") != SCENARIO_ID:
@@ -343,31 +343,33 @@ class _InMemoryGraphBackend:
                 if props.get("roadSegmentId") != road_segment_id:
                     raise ValueError("Warning road segment association conflicts with existing warning")
 
-                # Verify TRIGGERED_WARNING and DELIVERED_TO relationships
-                has_triggered = False
-                for edge in self._edges.values():
-                    if edge["type"] == "TRIGGERED_WARNING" and edge["source"] == hazard_id and edge["target"] == warning_id and edge.get("scenarioId") == SCENARIO_ID:
-                        has_triggered = True
-                        break
-                if not has_triggered:
-                    raise ValueError("Warning relationships conflict with existing warning node")
+                if props.get("hazardId") != hazard_id or props.get("vehicleId") != vehicle_id:
+                    raise ValueError("Warning ownership conflicts with existing warning node")
 
-                has_delivered = False
-                for edge in self._edges.values():
-                    if edge["type"] == "DELIVERED_TO" and edge["source"] == warning_id and edge["target"] == vehicle_id and edge.get("scenarioId") == SCENARIO_ID:
-                        has_delivered = True
-                        break
-                if not has_delivered:
-                    raise ValueError("Warning relationships conflict with existing warning node")
+                # Verify exactly one TRIGGERED_WARNING relationship exists
+                tw_edges = [
+                    edge for edge in self._edges.values()
+                    if edge["type"] == "TRIGGERED_WARNING" and edge["target"] == warning_id and edge.get("scenarioId") == SCENARIO_ID
+                ]
+                if len(tw_edges) != 1 or tw_edges[0]["source"] != hazard_id:
+                    raise ValueError("Warning must have exactly one matching TRIGGERED_WARNING relationship")
 
+                # Verify exactly one DELIVERED_TO relationship exists
+                dt_edges = [
+                    edge for edge in self._edges.values()
+                    if edge["type"] == "DELIVERED_TO" and edge["source"] == warning_id and edge.get("scenarioId") == SCENARIO_ID
+                ]
+                if len(dt_edges) != 1 or dt_edges[0]["target"] != vehicle_id:
+                    raise ValueError("Warning must have exactly one matching DELIVERED_TO relationship")
+
+                # Verify exactly one APPROACHING relationship exists if roadSegmentId is present
                 if road_segment_id:
-                    has_approaching = False
-                    for edge in self._edges.values():
-                        if edge["type"] == "APPROACHING" and edge["source"] == vehicle_id and edge["target"] == road_segment_id and edge.get("scenarioId") == SCENARIO_ID:
-                            has_approaching = True
-                            break
-                    if not has_approaching:
-                        raise ValueError("APPROACHING relationship conflicts with existing warning state")
+                    app_edges = [
+                        edge for edge in self._edges.values()
+                        if edge["type"] == "APPROACHING" and edge["source"] == vehicle_id and edge["target"] == road_segment_id and edge.get("scenarioId") == SCENARIO_ID
+                    ]
+                    if len(app_edges) != 1:
+                        raise ValueError("Warning must have exactly one matching APPROACHING relationship")
 
                 return
 
@@ -376,7 +378,14 @@ class _InMemoryGraphBackend:
                 warning_id,
                 "Warning",
                 f"Warning {warning_id}",
-                {"text": warning_text, "language": language, "timestamp": ts, "roadSegmentId": road_segment_id},
+                {
+                    "text": warning_text,
+                    "language": language,
+                    "timestamp": ts,
+                    "roadSegmentId": road_segment_id,
+                    "hazardId": hazard_id,
+                    "vehicleId": vehicle_id,
+                },
             )
             self._merge_edge_sync(
                 f"TRIGGERED_WARNING:{hazard_id}:{warning_id}",
@@ -1212,14 +1221,72 @@ class _Neo4jGraphBackend:
             if not rec or not rec["exists"]:
                 raise ValueError(f"RoadSegment node {road_segment_id} does not exist or has incorrect type/scenario")
 
-        # 4. Concurrency-safe MERGE of Warning node
+        # 4. First check whether the warning existed before this transaction
+        warn_check = """
+        MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+        RETURN w.text as text, w.language as language, w.roadSegmentId as roadSegmentId,
+               w.hazardId as hazardId, w.vehicleId as vehicleId
+        """
+        res_warn = await tx.run(warn_check, w_id=warning_id, scenario_id=SCENARIO_ID)
+        warn_rec = await res_warn.single()
+
+        if warn_rec:
+            # 5. Enforce property validation checks on retry
+            if warn_rec["text"] != warning_text or warn_rec["language"] != language:
+                raise ValueError("Warning properties conflict with existing warning node")
+            if warn_rec["roadSegmentId"] != road_segment_id:
+                raise ValueError("Warning road segment association conflicts with existing warning")
+            if warn_rec["hazardId"] != hazard_id or warn_rec["vehicleId"] != vehicle_id:
+                raise ValueError("Warning ownership conflicts with existing warning node")
+
+            # 6. Verify exactly one TRIGGERED_WARNING relationship exists
+            match_tw = """
+            MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+            OPTIONAL MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[r:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
+            RETURN count(r) as rel_count, collect(h.id) as hazard_ids
+            """
+            res_tw = await tx.run(match_tw, w_id=warning_id, scenario_id=SCENARIO_ID)
+            rec_tw = await res_tw.single()
+            if not rec_tw or rec_tw["rel_count"] != 1 or rec_tw["hazard_ids"] != [hazard_id]:
+                raise ValueError("Warning must have exactly one matching TRIGGERED_WARNING relationship")
+
+            # Verify exactly one DELIVERED_TO relationship exists
+            match_dt = """
+            MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+            OPTIONAL MATCH (w)-[r:DELIVERED_TO {scenario_id: $scenario_id}]->(v:SentinelPerception:Vehicle {scenario_id: $scenario_id})
+            RETURN count(r) as rel_count, collect(v.id) as vehicle_ids
+            """
+            res_dt = await tx.run(match_dt, w_id=warning_id, scenario_id=SCENARIO_ID)
+            rec_dt = await res_dt.single()
+            if not rec_dt or rec_dt["rel_count"] != 1 or rec_dt["vehicle_ids"] != [vehicle_id]:
+                raise ValueError("Warning must have exactly one matching DELIVERED_TO relationship")
+
+            # Verify exactly one APPROACHING relationship exists if roadSegmentId is present
+            if road_segment_id:
+                match_app = """
+                MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+                MATCH (seg:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+                OPTIONAL MATCH (v)-[r:APPROACHING {scenario_id: $scenario_id}]->(seg)
+                RETURN count(r) as rel_count
+                """
+                res_app = await tx.run(match_app, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
+                rec_app = await res_app.single()
+                if not rec_app or rec_app["rel_count"] != 1:
+                    raise ValueError("Warning must have exactly one matching APPROACHING relationship")
+
+            return
+
+        # 7. Merge the scenario-scoped Warning node
         merge_query = """
         MERGE (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
           ON CREATE SET w.text = $text,
                         w.language = $lang,
                         w.timestamp = $timestamp,
-                        w.roadSegmentId = $road_segment_id
-        RETURN w.text as text, w.language as language, w.roadSegmentId as roadSegmentId
+                        w.roadSegmentId = $road_segment_id,
+                        w.hazardId = $h_id,
+                        w.vehicleId = $v_id
+        RETURN w.text as text, w.language as language, w.roadSegmentId as roadSegmentId,
+               w.hazardId as hazardId, w.vehicleId as vehicleId
         """
         res_warn = await tx.run(
             merge_query,
@@ -1228,50 +1295,23 @@ class _Neo4jGraphBackend:
             lang=language,
             timestamp=ts,
             road_segment_id=road_segment_id,
+            h_id=hazard_id,
+            v_id=vehicle_id,
             scenario_id=SCENARIO_ID
         )
         warn_rec = await res_warn.single()
         if not warn_rec:
             raise RuntimeError("Warning merge failed to return the node properties")
 
-        # 5. Enforce immutable properties check
+        # Verify returned properties (concurrency verification)
         if warn_rec["text"] != warning_text or warn_rec["language"] != language:
             raise ValueError("Warning properties conflict with existing warning node")
         if warn_rec["roadSegmentId"] != road_segment_id:
             raise ValueError("Warning road segment association conflicts with existing warning")
+        if warn_rec["hazardId"] != hazard_id or warn_rec["vehicleId"] != vehicle_id:
+            raise ValueError("Warning ownership conflicts with existing warning node")
 
-        # 6. Concurrency-safe check of existing relationships to prevent conflicts
-        rel_check = """
-        MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
-        OPTIONAL MATCH (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v:SentinelPerception:Vehicle {scenario_id: $scenario_id})
-        RETURN collect(DISTINCT h.id) as hazard_ids, collect(DISTINCT v.id) as vehicle_ids
-        """
-        res_rels = await tx.run(rel_check, w_id=warning_id, scenario_id=SCENARIO_ID)
-        rels_rec = await res_rels.single()
-        if rels_rec:
-            existing_hids = [hid for hid in (rels_rec["hazard_ids"] or []) if hid is not None]
-            existing_vids = [vid for vid in (rels_rec["vehicle_ids"] or []) if vid is not None]
-
-            if existing_hids and existing_hids != [hazard_id]:
-                raise ValueError("Warning is already triggered by another hazard")
-            if existing_vids and existing_vids != [vehicle_id]:
-                raise ValueError("Warning is already delivered to another vehicle")
-
-            if existing_hids == [hazard_id] and existing_vids == [vehicle_id]:
-                if road_segment_id:
-                    app_check = """
-                    MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})-[a:APPROACHING {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
-                    RETURN count(a) > 0 as app_exists
-                    """
-                    res_app = await tx.run(app_check, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
-                    rec_app = await res_app.single()
-                    if rec_app and rec_app["app_exists"]:
-                        return
-                else:
-                    return
-
-        # 7. Merge relationships
+        # 8. Merge relationships within the same transaction
         rel_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
         MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
@@ -1327,21 +1367,29 @@ class _Neo4jGraphBackend:
         road_segment_id: str,
         road_segment_name: str,
     ) -> None:
-        check_query = """
-        OPTIONAL MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
-        OPTIONAL MATCH (v_any {id: $v_id})
-        OPTIONAL MATCH (r_any {id: $r_id})
-        RETURN v IS NOT NULL as v_ok, v_any IS NOT NULL as v_any_exists,
-               r IS NOT NULL as r_ok, r_any IS NOT NULL as r_any_exists
+        # Check vehicle ID conflicts among SentinelPerception nodes
+        v_conflict_query = """
+        MATCH (n:SentinelPerception {id: $v_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id
         """
-        res = await tx.run(check_query, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
-        rec = await res.single()
-        if rec:
-            if rec["v_any_exists"] and not rec["v_ok"]:
-                raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
-            if rec["r_any_exists"] and not rec["r_ok"]:
-                raise ValueError(f"Node {road_segment_id} exists but is not a RoadSegment of scenario {SCENARIO_ID}")
+        res_v = await tx.run(v_conflict_query, v_id=vehicle_id)
+        async for rec in res_v:
+            labels = rec["labels"] or []
+            scenario_id = rec["scenario_id"]
+            if "Vehicle" not in labels or scenario_id != SCENARIO_ID:
+                raise ValueError(f"Node {vehicle_id} exists as a conflicting SentinelPerception node")
+
+        # Check road segment ID conflicts among SentinelPerception nodes
+        r_conflict_query = """
+        MATCH (n:SentinelPerception {id: $r_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id
+        """
+        res_r = await tx.run(r_conflict_query, r_id=road_segment_id)
+        async for rec in res_r:
+            labels = rec["labels"] or []
+            scenario_id = rec["scenario_id"]
+            if "RoadSegment" not in labels or scenario_id != SCENARIO_ID:
+                raise ValueError(f"Node {road_segment_id} exists as a conflicting SentinelPerception node")
 
         query = """
         MERGE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
