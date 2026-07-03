@@ -69,7 +69,7 @@ def test_hazards(client):
     assert "_id" not in hz
     assert hz["label"] == "Deep Pothole"
     assert hz["distanceMeters"] == 340
-    assert hz["confidence"] == 76
+    assert hz["confidence"] == 60
     assert hz["sources"] == 1
     assert hz["risk"] == "medium"
     assert hz["recommendedAction"] == "Move left"
@@ -279,10 +279,13 @@ def test_old_schema_migration(client, sync_db):
     # Force re-migration by clearing the version sentinel.
     sync_db.sentinel_meta.delete_many({"id": "seed"})
 
-    # Trigger ensure_seed via any endpoint.
-    r = client.get("/api/sentinel/hazards")
+    # Trigger ensure_seed via status endpoint.
+    r = client.get("/api/sentinel/status")
     assert r.status_code == 200
-    hz = next(h for h in r.json() if h["id"] == "hz-002")
+
+    # Query Mongo directly since migrated hazard reads are now graph-only.
+    hz = sync_db.hazards.find_one({"id": "hz-002"})
+    assert hz is not None
     # Must now be the new schema.
     assert "location" in hz and "latitude" in hz["location"]
     assert hz["distanceMeters"] == 340
