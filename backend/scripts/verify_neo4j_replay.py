@@ -176,6 +176,14 @@ async def run_verification():
             rec = await res.single()
             assert rec and rec["count"] == 4, f"Expected TRIGGERED_WARNING relationship count to remain 4, got {rec['count'] if rec else 0}"
 
+            # Check DELIVERED_TO relationship count remains 4
+            res = await session.run(
+                "MATCH ()-[r:DELIVERED_TO {scenario_id: $scenario_id}]->() RETURN count(r) as count",
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec and rec["count"] == 4, f"Expected DELIVERED_TO relationship count to remain 4, got {rec['count'] if rec else 0}"
+
             # Check hazard stats do not increase
             res = await session.run(
                 "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.sourceCount as sc, h.confidence as conf",
@@ -183,6 +191,7 @@ async def run_verification():
             )
             rec = await res.single()
             assert rec and rec["sc"] == 1, f"Expected sourceCount to remain 1, got {rec['sc']}"
+            assert rec and rec["conf"] == 60, f"Expected confidence to remain 60, got {rec['conf']}"
 
         print("PASS: Idempotency assertions verified")
 
@@ -234,19 +243,25 @@ async def run_verification():
 
         # Verify only 1 Warning and 1 relationship pair exist for conflict ID in Neo4j
         async with driver.session(database=db_name) as session:
+            # Query Warning properties and connected relationships
             res = await session.run(
-                "MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id}) RETURN count(w) as count",
+                "MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id}) "
+                "OPTIONAL MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[r1:TRIGGERED_WARNING]->(w) "
+                "OPTIONAL MATCH (w)-[r2:DELIVERED_TO]->(v:SentinelPerception:Vehicle {scenario_id: $scenario_id}) "
+                "RETURN count(w) as w_count, count(r1) as tw_count, count(r2) as dt_count, "
+                "       h.id as actual_hazardId, v.id as actual_vehicleId, "
+                "       w.hazardId as prop_hazardId, w.vehicleId as prop_vehicleId",
                 w_id=conflict_warning_id, scenario_id=SCENARIO_ID
             )
             rec = await res.single()
-            assert rec and rec["count"] == 1, "Expected exactly 1 warning node for concurrent ownership conflict"
-
-            res = await session.run(
-                "MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})-[r:DELIVERED_TO]->() RETURN count(r) as count",
-                w_id=conflict_warning_id, scenario_id=SCENARIO_ID
-            )
-            rec = await res.single()
-            assert rec and rec["count"] == 1, "Expected exactly 1 DELIVERED_TO relationship for concurrent ownership conflict"
+            assert rec is not None
+            assert rec["w_count"] == 1, f"Expected exactly 1 warning node, got {rec['w_count']}"
+            assert rec["tw_count"] == 1, f"Expected exactly 1 TRIGGERED_WARNING, got {rec['tw_count']}"
+            assert rec["dt_count"] == 1, f"Expected exactly 1 DELIVERED_TO, got {rec['dt_count']}"
+            assert rec["prop_vehicleId"] == rec["actual_vehicleId"], "Warning.vehicleId property does not match actual DELIVERED_TO vehicle"
+            assert rec["prop_hazardId"] == rec["actual_hazardId"], "Warning.hazardId property does not match actual TRIGGERED_WARNING hazard"
+            assert rec["prop_hazardId"] == hazard_id, f"Expected Warning.hazardId == {hazard_id}, got {rec['prop_hazardId']}"
+            assert rec["prop_vehicleId"] in ("v-2", "v-3"), f"Expected Warning.vehicleId to be v-2 or v-3, got {rec['prop_vehicleId']}"
 
         print("PASS: Concurrent ownership conflict verified")
 
@@ -269,24 +284,71 @@ async def run_verification():
             return_exceptions=True
         )
 
-        success_count = sum(1 for r in results_hz_conflict if r is None)
-        error_count = sum(1 for r in results_hz_conflict if isinstance(r, ValueError))
+        success_count_hz = sum(1 for r in results_hz_conflict if r is None)
+        error_count_hz = sum(1 for r in results_hz_conflict if isinstance(r, ValueError))
         hz_exception_types = [type(r).__name__ for r in results_hz_conflict if isinstance(r, Exception)]
 
-        assert success_count == 1, f"Expected 1 success, got {success_count}"
-        assert error_count == 1, f"Expected 1 ValueError, got {error_count} (exceptions: {hz_exception_types})"
+        assert success_count_hz == 1, f"Expected 1 success, got {success_count_hz}"
+        assert error_count_hz == 1, f"Expected 1 ValueError, got {error_count_hz} (exceptions: {hz_exception_types})"
 
         # Verify only 1 Warning node exists in Neo4j
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id}) RETURN count(w) as count",
+                "MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id}) "
+                "OPTIONAL MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[r1:TRIGGERED_WARNING]->(w) "
+                "OPTIONAL MATCH (w)-[r2:DELIVERED_TO]->(v:SentinelPerception:Vehicle {scenario_id: $scenario_id}) "
+                "RETURN count(w) as w_count, count(r1) as tw_count, count(r2) as dt_count, "
+                "       h.id as actual_hazardId, v.id as actual_vehicleId, "
+                "       w.hazardId as prop_hazardId, w.vehicleId as prop_vehicleId",
                 w_id=hz_conflict_warning_id, scenario_id=SCENARIO_ID
             )
             rec = await res.single()
-            assert rec and rec["count"] == 1, "Expected exactly 1 warning node for concurrent hazard conflict"
+            assert rec is not None
+            assert rec["w_count"] == 1, f"Expected exactly 1 warning node, got {rec['w_count']}"
+            assert rec["tw_count"] == 1, f"Expected exactly 1 TRIGGERED_WARNING, got {rec['tw_count']}"
+            assert rec["dt_count"] == 1, f"Expected exactly 1 DELIVERED_TO, got {rec['dt_count']}"
+            assert rec["prop_hazardId"] == rec["actual_hazardId"], "Warning.hazardId property does not match actual TRIGGERED_WARNING hazard"
+            assert rec["prop_vehicleId"] == rec["actual_vehicleId"], "Warning.vehicleId property does not match actual DELIVERED_TO vehicle"
+            assert rec["prop_vehicleId"] == "v-1", f"Expected Warning.vehicleId == v-1, got {rec['prop_vehicleId']}"
+            assert rec["prop_hazardId"] in (hazard_id, hz_another_id), f"Expected Warning.hazardId in ({hazard_id}, {hz_another_id}), got {rec['prop_hazardId']}"
 
         print("PASS: Concurrent hazard conflict verified")
-        print("\nALL STAGE B2B INTEGRITY VERIFICATIONS PASSED.")
+
+        # 13. Print final successful counts
+        async with driver.session(database=db_name) as session:
+            res_h = await session.run("MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id}) RETURN count(h) as count", scenario_id=SCENARIO_ID)
+            count_h = (await res_h.single())["count"]
+
+            res_o = await session.run("MATCH (o:SentinelPerception:Observation {scenario_id: $scenario_id}) RETURN count(o) as count", scenario_id=SCENARIO_ID)
+            count_o = (await res_o.single())["count"]
+
+            res_w = await session.run("MATCH (w:SentinelPerception:Warning {scenario_id: $scenario_id}) RETURN count(w) as count", scenario_id=SCENARIO_ID)
+            count_w = (await res_w.single())["count"]
+
+            res_tw = await session.run("MATCH ()-[r:TRIGGERED_WARNING {scenario_id: $scenario_id}]->() RETURN count(r) as count", scenario_id=SCENARIO_ID)
+            count_tw = (await res_tw.single())["count"]
+
+            res_dt = await session.run("MATCH ()-[r:DELIVERED_TO {scenario_id: $scenario_id}]->() RETURN count(r) as count", scenario_id=SCENARIO_ID)
+            count_dt = (await res_dt.single())["count"]
+
+            res_recip = await session.run("MATCH (w:SentinelPerception:Warning {scenario_id: $scenario_id})-[r:DELIVERED_TO]->(v:SentinelPerception:Vehicle) RETURN distinct v.id as vehicle_id", scenario_id=SCENARIO_ID)
+            recip_ids = []
+            async for r in res_recip:
+                recip_ids.append(r["vehicle_id"])
+
+        print("\n=== FINAL SUCCESSFUL COUNTS ===")
+        print(f"Hazards: {count_h}")
+        print(f"Observations: {count_o}")
+        print(f"Warnings: {count_w}")
+        print(f"TRIGGERED_WARNING relationships: {count_tw}")
+        print(f"DELIVERED_TO relationships: {count_dt}")
+        print(f"Recipient IDs: {sorted(recip_ids)}")
+        print("Concurrent Conflict Success/Error Counts:")
+        print(f"  - Ownership conflict: Success={success_count}, Errors={error_count}, Exception types={exception_types}")
+        print(f"  - Hazard conflict: Success={success_count_hz}, Errors={error_count_hz}, Exception types={hz_exception_types}")
+        print("================================\n")
+
+        print("ALL STAGE B2B INTEGRITY VERIFICATIONS PASSED.")
 
     except Exception as e:
         print(f"FAIL: Verification failed: {type(e).__name__}")
