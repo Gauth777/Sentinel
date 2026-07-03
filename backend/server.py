@@ -456,6 +456,19 @@ async def ensure_seed() -> None:
     )
 
 
+async def _seed_demo_graph_vehicles() -> None:
+    for v in SEED_VEHICLES:
+        try:
+            await _perception_graph.upsert_vehicle_approach(
+                vehicle_id=v["id"],
+                vehicle_label=v["label"],
+                road_segment_id="gst",
+                road_segment_name="GST Road Northbound",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to seed demo graph vehicle {v['id']}: {type(e).__name__}")
+
+
 # ======================= App =======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -464,6 +477,7 @@ async def lifespan(app: FastAPI):
     set_store(store)
 
     await _perception_graph.initialize()
+    await _seed_demo_graph_vehicles()
     await _training_samples.initialize()
     await _demo_replay.initialize()
     try:
@@ -757,8 +771,9 @@ async def demo_observation(req: DemoObservationRequest):
 async def demo_reset():
     try:
         await _perception_graph.reset_demo_data()
+        await _seed_demo_graph_vehicles()
     except Exception as e:
-        logger.warning(f"PerceptionGraphService reset failed: {type(e).__name__}")
+        logger.warning(f"PerceptionGraphService reset/seeding failed: {type(e).__name__}")
     await db.hazards.delete_many({})
     await db.observations.delete_many({})
     await db.sentinel_meta.delete_many({})

@@ -185,7 +185,7 @@ def test_perception_graph_warning_chain(client):
     assert r.status_code == 200
     res_json = r.json()
     hazard_id = res_json["id"]
-    assert len(res_json.get("_warning_events", [])) == 1
+    assert len(res_json.get("_warning_events", [])) == 4
 
     graph = client.get(f"/api/sentinel/perception-graph?hazard_id={hazard_id}").json()
     edge_types = {e["type"] for e in graph["edges"]}
@@ -193,9 +193,11 @@ def test_perception_graph_warning_chain(client):
     assert "DELIVERED_TO" in edge_types
 
     warning_nodes = [n for n in graph["nodes"] if n["type"] == "Warning"]
-    assert len(warning_nodes) == 1
-    assert warning_nodes[0]["properties"]["language"] == "en"
-    assert warning_nodes[0]["properties"]["text"] == res_json["warnings"]["en"]
+    assert len(warning_nodes) == 4
+    # All warning nodes are in English
+    for node in warning_nodes:
+        assert node["properties"]["language"] == "en"
+        assert node["properties"]["text"] == res_json["warnings"]["en"]
 
 
 # ---------------------------------------------------------------------------

@@ -401,6 +401,74 @@ class _InMemoryGraphBackend:
                     {},
                 )
 
+    async def upsert_vehicle_approach(
+        self,
+        vehicle_id: str,
+        vehicle_label: str,
+        road_segment_id: str,
+        road_segment_name: str,
+    ) -> None:
+        async with self._lock:
+            if vehicle_id in self._nodes:
+                node = self._nodes[vehicle_id]
+                if node.get("type") != "Vehicle" or node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
+            if road_segment_id in self._nodes:
+                node = self._nodes[road_segment_id]
+                if node.get("type") != "RoadSegment" or node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Node {road_segment_id} exists but is not a RoadSegment of scenario {SCENARIO_ID}")
+
+            self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label, {})
+            self._merge_node_sync(road_segment_id, "RoadSegment", road_segment_name, {})
+            self._merge_edge_sync(
+                f"APPROACHING:{vehicle_id}:{road_segment_id}",
+                "APPROACHING",
+                vehicle_id,
+                road_segment_id,
+                {},
+            )
+
+    async def get_warning_recipient_vehicle_ids(
+        self,
+        hazard_id: str,
+        source_vehicle_id: str,
+    ) -> List[str]:
+        async with self._lock:
+            hz_node = self._nodes.get(hazard_id)
+            if not hz_node or hz_node.get("type") != "Hazard" or hz_node.get("scenarioId") != SCENARIO_ID:
+                raise ValueError(f"Hazard node {hazard_id} does not exist or has incorrect type/scenario")
+
+            props = hz_node.get("properties", {})
+            if props.get("status", "active") != "active":
+                return []
+
+            valid_roads = []
+            for edge in self._edges.values():
+                if edge["type"] == "ON_ROAD" and edge["source"] == hazard_id and edge.get("scenarioId") == SCENARIO_ID:
+                    target_id = edge["target"]
+                    target_node = self._nodes.get(target_id)
+                    if target_node and target_node.get("type") == "RoadSegment" and target_node.get("scenarioId") == SCENARIO_ID:
+                        valid_roads.append(target_id)
+
+            if len(valid_roads) == 0:
+                raise ValueError(f"Hazard {hazard_id} has zero valid ON_ROAD relationships")
+            if len(valid_roads) > 1:
+                raise ValueError(f"Hazard {hazard_id} has multiple valid ON_ROAD relationships")
+
+            road_segment_id = valid_roads[0]
+
+            peers = set()
+            for edge in self._edges.values():
+                if edge["type"] == "APPROACHING" and edge["target"] == road_segment_id and edge.get("scenarioId") == SCENARIO_ID:
+                    veh_id = edge["source"]
+                    if veh_id == source_vehicle_id:
+                        continue
+                    veh_node = self._nodes.get(veh_id)
+                    if veh_node and veh_node.get("type") == "Vehicle" and veh_node.get("scenarioId") == SCENARIO_ID:
+                        peers.add(veh_id)
+
+            return sorted(list(peers))
+
     def _build_hazard_component(self, hazard_id: str) -> Dict[str, Dict[str, Any]]:
         nodes: Dict[str, Dict[str, Any]] = {}
         edges: Dict[str, Dict[str, Any]] = {}
@@ -1113,112 +1181,110 @@ class _Neo4jGraphBackend:
     ) -> None:
         ts = timestamp or 0.0
 
-        # Validate Hazard
+        # 1. Validate Hazard exists (directly labelled and scenario-scoped)
         hz_check = """
-        MATCH (n {id: $h_id})
-        RETURN labels(n) as labels, n.scenario_id as scenario_id
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN count(h) > 0 as exists
         """
-        res = await tx.run(hz_check, h_id=hazard_id)
+        res = await tx.run(hz_check, h_id=hazard_id, scenario_id=SCENARIO_ID)
         rec = await res.single()
-        if not rec:
-            raise ValueError(f"Hazard node {hazard_id} does not exist")
-        labels = rec["labels"] or []
-        if "Hazard" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
-            raise ValueError(f"Hazard node {hazard_id} has incorrect type/scenario")
+        if not rec or not rec["exists"]:
+            raise ValueError(f"Hazard node {hazard_id} does not exist or has incorrect type/scenario")
 
-        # Validate Vehicle
+        # 2. Validate Vehicle exists (directly labelled and scenario-scoped)
         v_check = """
-        MATCH (n {id: $v_id})
-        RETURN labels(n) as labels, n.scenario_id as scenario_id
+        MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+        RETURN count(v) > 0 as exists
         """
-        res = await tx.run(v_check, v_id=vehicle_id)
+        res = await tx.run(v_check, v_id=vehicle_id, scenario_id=SCENARIO_ID)
         rec = await res.single()
-        if not rec:
-            raise ValueError(f"Vehicle node {vehicle_id} does not exist")
-        labels = rec["labels"] or []
-        if "Vehicle" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
-            raise ValueError(f"Vehicle node {vehicle_id} has incorrect type/scenario")
+        if not rec or not rec["exists"]:
+            raise ValueError(f"Vehicle node {vehicle_id} does not exist or has incorrect type/scenario")
 
-        # Validate RoadSegment
+        # 3. Validate RoadSegment exists (directly labelled and scenario-scoped)
         if road_segment_id:
             r_check = """
-            MATCH (n {id: $r_id})
-            RETURN labels(n) as labels, n.scenario_id as scenario_id
+            MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+            RETURN count(r) > 0 as exists
             """
-            res = await tx.run(r_check, r_id=road_segment_id)
+            res = await tx.run(r_check, r_id=road_segment_id, scenario_id=SCENARIO_ID)
             rec = await res.single()
-            if not rec:
-                raise ValueError(f"RoadSegment node {road_segment_id} does not exist")
-            labels = rec["labels"] or []
-            if "RoadSegment" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
-                raise ValueError(f"RoadSegment node {road_segment_id} has incorrect type/scenario")
+            if not rec or not rec["exists"]:
+                raise ValueError(f"RoadSegment node {road_segment_id} does not exist or has incorrect type/scenario")
 
-        # Check existing Warning (Retry / Idempotency)
-        warn_check = """
-        MATCH (w {id: $w_id})
-        RETURN labels(w) as labels, w.scenario_id as scenario_id, w.text as text, w.language as language, w.roadSegmentId as roadSegmentId
+        # 4. Concurrency-safe MERGE of Warning node
+        merge_query = """
+        MERGE (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+          ON CREATE SET w.text = $text,
+                        w.language = $lang,
+                        w.timestamp = $timestamp,
+                        w.roadSegmentId = $road_segment_id
+        RETURN w.text as text, w.language as language, w.roadSegmentId as roadSegmentId
         """
-        res = await tx.run(warn_check, w_id=warning_id)
-        rec = await res.single()
-        if rec:
-            labels = rec["labels"] or []
-            if "Warning" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
-                raise ValueError(f"Warning node {warning_id} has incorrect type/scenario")
-
-            if rec["text"] != warning_text or rec["language"] != language:
-                raise ValueError("Warning properties conflict with existing warning node")
-
-            if rec["roadSegmentId"] != road_segment_id:
-                raise ValueError("Warning road segment association conflicts with existing warning")
-
-            # Verify TRIGGERED_WARNING and DELIVERED_TO relationships
-            rel_check = """
-            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
-            MATCH (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
-            RETURN count(w) > 0 as rels_exist
-            """
-            res_rels = await tx.run(rel_check, h_id=hazard_id, w_id=warning_id, v_id=vehicle_id, scenario_id=SCENARIO_ID)
-            rec_rels = await res_rels.single()
-            if not rec_rels or not rec_rels["rels_exist"]:
-                raise ValueError("Warning relationships conflict with existing warning node")
-
-            if road_segment_id:
-                app_check = """
-                MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})-[:APPROACHING {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
-                RETURN count(v) > 0 as app_exists
-                """
-                res_app = await tx.run(app_check, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
-                rec_app = await res_app.single()
-                if not rec_app or not rec_app["app_exists"]:
-                    raise ValueError("APPROACHING relationship conflicts with existing warning state")
-
-            return
-
-        # Create Warning and relationships
-        create_query = """
-        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
-        CREATE (w:SentinelPerception:Warning {
-            id: $w_id,
-            scenario_id: $scenario_id,
-            text: $text,
-            language: $lang,
-            timestamp: $timestamp,
-            roadSegmentId: $road_segment_id
-        })
-        CREATE (h)-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
-        CREATE (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v)
-        """
-        await tx.run(
-            create_query,
-            h_id=hazard_id,
-            v_id=vehicle_id,
+        res_warn = await tx.run(
+            merge_query,
             w_id=warning_id,
             text=warning_text,
             lang=language,
             timestamp=ts,
             road_segment_id=road_segment_id,
-            scenario_id=SCENARIO_ID,
+            scenario_id=SCENARIO_ID
+        )
+        warn_rec = await res_warn.single()
+        if not warn_rec:
+            raise RuntimeError("Warning merge failed to return the node properties")
+
+        # 5. Enforce immutable properties check
+        if warn_rec["text"] != warning_text or warn_rec["language"] != language:
+            raise ValueError("Warning properties conflict with existing warning node")
+        if warn_rec["roadSegmentId"] != road_segment_id:
+            raise ValueError("Warning road segment association conflicts with existing warning")
+
+        # 6. Concurrency-safe check of existing relationships to prevent conflicts
+        rel_check = """
+        MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id})-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
+        OPTIONAL MATCH (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v:SentinelPerception:Vehicle {scenario_id: $scenario_id})
+        RETURN collect(DISTINCT h.id) as hazard_ids, collect(DISTINCT v.id) as vehicle_ids
+        """
+        res_rels = await tx.run(rel_check, w_id=warning_id, scenario_id=SCENARIO_ID)
+        rels_rec = await res_rels.single()
+        if rels_rec:
+            existing_hids = [hid for hid in (rels_rec["hazard_ids"] or []) if hid is not None]
+            existing_vids = [vid for vid in (rels_rec["vehicle_ids"] or []) if vid is not None]
+
+            if existing_hids and existing_hids != [hazard_id]:
+                raise ValueError("Warning is already triggered by another hazard")
+            if existing_vids and existing_vids != [vehicle_id]:
+                raise ValueError("Warning is already delivered to another vehicle")
+
+            if existing_hids == [hazard_id] and existing_vids == [vehicle_id]:
+                if road_segment_id:
+                    app_check = """
+                    MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})-[a:APPROACHING {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+                    RETURN count(a) > 0 as app_exists
+                    """
+                    res_app = await tx.run(app_check, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
+                    rec_app = await res_app.single()
+                    if rec_app and rec_app["app_exists"]:
+                        return
+                else:
+                    return
+
+        # 7. Merge relationships
+        rel_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+        MATCH (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+        MERGE (h)-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
+        MERGE (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v)
+        """
+        await tx.run(
+            rel_query,
+            h_id=hazard_id,
+            v_id=vehicle_id,
+            w_id=warning_id,
+            scenario_id=SCENARIO_ID
         )
 
         if road_segment_id:
@@ -1233,6 +1299,108 @@ class _Neo4jGraphBackend:
                 r_id=road_segment_id,
                 scenario_id=SCENARIO_ID,
             )
+
+    async def upsert_vehicle_approach(
+        self,
+        vehicle_id: str,
+        vehicle_label: str,
+        road_segment_id: str,
+        road_segment_name: str,
+    ) -> None:
+        if self._driver is None:
+            raise RuntimeError("Neo4j driver not initialized")
+
+        async with self._driver.session(database=self._database) as session:
+            await session.execute_write(
+                self._upsert_vehicle_approach_tx,
+                vehicle_id=vehicle_id,
+                vehicle_label=vehicle_label,
+                road_segment_id=road_segment_id,
+                road_segment_name=road_segment_name,
+            )
+
+    async def _upsert_vehicle_approach_tx(
+        self,
+        tx,
+        vehicle_id: str,
+        vehicle_label: str,
+        road_segment_id: str,
+        road_segment_name: str,
+    ) -> None:
+        check_query = """
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (v_any {id: $v_id})
+        OPTIONAL MATCH (r_any {id: $r_id})
+        RETURN v IS NOT NULL as v_ok, v_any IS NOT NULL as v_any_exists,
+               r IS NOT NULL as r_ok, r_any IS NOT NULL as r_any_exists
+        """
+        res = await tx.run(check_query, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
+        rec = await res.single()
+        if rec:
+            if rec["v_any_exists"] and not rec["v_ok"]:
+                raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
+            if rec["r_any_exists"] and not rec["r_ok"]:
+                raise ValueError(f"Node {road_segment_id} exists but is not a RoadSegment of scenario {SCENARIO_ID}")
+
+        query = """
+        MERGE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+          ON CREATE SET v.label = $v_label
+          ON MATCH SET v.label = $v_label
+        MERGE (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+          ON CREATE SET r.name = $r_name
+          ON MATCH SET r.name = $r_name
+        MERGE (v)-[:APPROACHING {scenario_id: $scenario_id}]->(r)
+        """
+        await tx.run(
+            query,
+            v_id=vehicle_id,
+            v_label=vehicle_label,
+            r_id=road_segment_id,
+            r_name=road_segment_name,
+            scenario_id=SCENARIO_ID,
+        )
+
+    async def get_warning_recipient_vehicle_ids(
+        self,
+        hazard_id: str,
+        source_vehicle_id: str,
+    ) -> List[str]:
+        hz_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN coalesce(h.status, 'active') as status
+        """
+        records = await self._run_read(hz_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        if not records:
+            raise ValueError(f"Hazard node {hazard_id} does not exist or has incorrect type/scenario")
+
+        status = records[0]["status"]
+        if status != "active":
+            return []
+
+        road_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        MATCH (h)-[r:ON_ROAD {scenario_id: $scenario_id}]->(seg:SentinelPerception:RoadSegment {scenario_id: $scenario_id})
+        RETURN seg.id as road_id
+        """
+        records_roads = await self._run_read(road_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+
+        if len(records_roads) == 0:
+            raise ValueError(f"Hazard {hazard_id} has zero valid ON_ROAD relationships")
+        if len(records_roads) > 1:
+            raise ValueError(f"Hazard {hazard_id} has multiple valid ON_ROAD relationships")
+
+        road_segment_id = records_roads[0]["road_id"]
+
+        vehicles_query = """
+        MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[a:APPROACHING {scenario_id: $scenario_id}]->(r)
+        WHERE v.id <> $source_vehicle_id
+        RETURN DISTINCT v.id as vehicle_id
+        """
+        records_v = await self._run_read(vehicles_query, r_id=road_segment_id, source_vehicle_id=source_vehicle_id, scenario_id=SCENARIO_ID)
+        vehicle_ids = [rec["vehicle_id"] for rec in records_v]
+        return sorted(vehicle_ids)
 
     async def build_graph(
         self, hazard_id: Optional[str] = None, limit: int = 25
@@ -2271,6 +2439,66 @@ class PerceptionGraphService:
             timestamp=ts,
             hazard_fields=normalized_fields,
         )
+
+    async def upsert_vehicle_approach(
+        self,
+        vehicle_id: str,
+        vehicle_label: str,
+        road_segment_id: str,
+        road_segment_name: str,
+    ) -> None:
+        _validate_input_str(vehicle_id, "vehicle_id")
+        _validate_input_str(vehicle_label, "vehicle_label")
+        _validate_input_str(road_segment_id, "road_segment_id")
+        _validate_input_str(road_segment_name, "road_segment_name")
+
+        if self._mode == "neo4j":
+            try:
+                return await self._neo4j.upsert_vehicle_approach(
+                    vehicle_id=vehicle_id,
+                    vehicle_label=vehicle_label,
+                    road_segment_id=road_segment_id,
+                    road_segment_name=road_segment_name,
+                )
+            except ValueError:
+                raise
+            except Exception:
+                if self._strict:
+                    self._neo4j_connected = False
+                raise RuntimeError("Neo4j upsert_vehicle_approach failed") from None
+        else:
+            return await self._memory.upsert_vehicle_approach(
+                vehicle_id=vehicle_id,
+                vehicle_label=vehicle_label,
+                road_segment_id=road_segment_id,
+                road_segment_name=road_segment_name,
+            )
+
+    async def get_warning_recipient_vehicle_ids(
+        self,
+        hazard_id: str,
+        source_vehicle_id: str,
+    ) -> List[str]:
+        _validate_input_str(hazard_id, "hazard_id")
+        _validate_input_str(source_vehicle_id, "source_vehicle_id")
+
+        if self._mode == "neo4j":
+            try:
+                return await self._neo4j.get_warning_recipient_vehicle_ids(
+                    hazard_id=hazard_id,
+                    source_vehicle_id=source_vehicle_id,
+                )
+            except ValueError:
+                raise
+            except Exception:
+                if self._strict:
+                    self._neo4j_connected = False
+                raise RuntimeError("Neo4j recipient lookup failed") from None
+        else:
+            return await self._memory.get_warning_recipient_vehicle_ids(
+                hazard_id=hazard_id,
+                source_vehicle_id=source_vehicle_id,
+            )
 
     async def build_graph(
         self, hazard_id: Optional[str] = None, limit: int = 25
