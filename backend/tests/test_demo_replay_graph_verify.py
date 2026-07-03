@@ -86,6 +86,18 @@ async def test_graph_verify_warning_nodes(graph_client):
         timestamp=123.45,
     )
 
+    await svc.record_observation(
+        observation_id="obs-ego-init",
+        vehicle_id="v-ego",
+        vehicle_label="Ego Vehicle",
+        hazard_id="hzd-2",
+        hazard_type="road_hazard",
+        hazard_label="Pothole",
+        road_segment_id="road-1",
+        road_segment_name="Mathura Road",
+        timestamp=123.40,
+    )
+
     await svc.record_warning(
         warning_id="warn-1",
         hazard_id="hzd-2",

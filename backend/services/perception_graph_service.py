@@ -316,22 +316,68 @@ class _InMemoryGraphBackend:
         ts = timestamp or 0.0
 
         async with self._lock:
+            # 2. EXISTING-NODE-ONLY SEMANTICS
+            hz_node = self._nodes.get(hazard_id)
+            if not hz_node or hz_node.get("type") != "Hazard" or hz_node.get("scenarioId") != SCENARIO_ID:
+                raise ValueError(f"Hazard node {hazard_id} does not exist or has incorrect type/scenario")
+
+            v_node = self._nodes.get(vehicle_id)
+            if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                raise ValueError(f"Vehicle node {vehicle_id} does not exist or has incorrect type/scenario")
+
+            if road_segment_id:
+                r_node = self._nodes.get(road_segment_id)
+                if not r_node or r_node.get("type") != "RoadSegment" or r_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"RoadSegment node {road_segment_id} does not exist or has incorrect type/scenario")
+
+            # 3. IMMUTABLE IDEMPOTENCY
+            existing_warn = self._nodes.get(warning_id)
+            if existing_warn:
+                if existing_warn.get("type") != "Warning" or existing_warn.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Warning node {warning_id} has incorrect type/scenario")
+
+                props = existing_warn.get("properties", {})
+                if props.get("text") != warning_text or props.get("language") != language:
+                    raise ValueError("Warning properties conflict with existing warning node")
+
+                if props.get("roadSegmentId") != road_segment_id:
+                    raise ValueError("Warning road segment association conflicts with existing warning")
+
+                # Verify TRIGGERED_WARNING and DELIVERED_TO relationships
+                has_triggered = False
+                for edge in self._edges.values():
+                    if edge["type"] == "TRIGGERED_WARNING" and edge["source"] == hazard_id and edge["target"] == warning_id and edge.get("scenarioId") == SCENARIO_ID:
+                        has_triggered = True
+                        break
+                if not has_triggered:
+                    raise ValueError("Warning relationships conflict with existing warning node")
+
+                has_delivered = False
+                for edge in self._edges.values():
+                    if edge["type"] == "DELIVERED_TO" and edge["source"] == warning_id and edge["target"] == vehicle_id and edge.get("scenarioId") == SCENARIO_ID:
+                        has_delivered = True
+                        break
+                if not has_delivered:
+                    raise ValueError("Warning relationships conflict with existing warning node")
+
+                if road_segment_id:
+                    has_approaching = False
+                    for edge in self._edges.values():
+                        if edge["type"] == "APPROACHING" and edge["source"] == vehicle_id and edge["target"] == road_segment_id and edge.get("scenarioId") == SCENARIO_ID:
+                            has_approaching = True
+                            break
+                    if not has_approaching:
+                        raise ValueError("APPROACHING relationship conflicts with existing warning state")
+
+                return
+
+            # Create Warning and relationships
             self._merge_node_sync(
                 warning_id,
                 "Warning",
                 f"Warning {warning_id}",
-                {"text": warning_text, "language": language, "timestamp": ts},
+                {"text": warning_text, "language": language, "timestamp": ts, "roadSegmentId": road_segment_id},
             )
-            hz_label = hazard_id
-            if hazard_id in self._nodes:
-                hz_label = self._nodes[hazard_id].get("label", hazard_id)
-            self._merge_node_sync(hazard_id, "Hazard", hz_label, {})
-
-            v_label = vehicle_id
-            if vehicle_id in self._nodes:
-                v_label = self._nodes[vehicle_id].get("label", vehicle_id)
-            self._merge_node_sync(vehicle_id, "Vehicle", v_label, {})
-
             self._merge_edge_sync(
                 f"TRIGGERED_WARNING:{hazard_id}:{warning_id}",
                 "TRIGGERED_WARNING",
@@ -346,14 +392,7 @@ class _InMemoryGraphBackend:
                 vehicle_id,
                 {},
             )
-
             if road_segment_id:
-                r_label = road_segment_id
-                if road_segment_id in self._nodes:
-                    r_label = self._nodes[road_segment_id].get("label", road_segment_id)
-                self._merge_node_sync(
-                    road_segment_id, "RoadSegment", r_label, {}
-                )
                 self._merge_edge_sync(
                     f"APPROACHING:{vehicle_id}:{road_segment_id}",
                     "APPROACHING",
@@ -1046,36 +1085,150 @@ class _Neo4jGraphBackend:
         road_segment_id: Optional[str] = None,
         timestamp: Optional[float] = None,
     ) -> None:
+        if self._driver is None:
+            raise RuntimeError("Neo4j driver not initialized")
+
+        async with self._driver.session(database=self._database) as session:
+            await session.execute_write(
+                self._record_warning_tx,
+                warning_id=warning_id,
+                hazard_id=hazard_id,
+                vehicle_id=vehicle_id,
+                warning_text=warning_text,
+                language=language,
+                road_segment_id=road_segment_id,
+                timestamp=timestamp,
+            )
+
+    async def _record_warning_tx(
+        self,
+        tx,
+        warning_id: str,
+        hazard_id: str,
+        vehicle_id: str,
+        warning_text: str,
+        language: str,
+        road_segment_id: Optional[str],
+        timestamp: Optional[float],
+    ) -> None:
         ts = timestamp or 0.0
 
-        query = """
-        MERGE (w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
-          ON CREATE SET w.text = $text, w.language = $lang, w.timestamp = $timestamp
-          ON MATCH SET w.text = $text, w.language = $lang, w.timestamp = $timestamp
-        MERGE (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
-        MERGE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
-        MERGE (h)-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
-        MERGE (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v)
+        # Validate Hazard
+        hz_check = """
+        MATCH (n {id: $h_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id
         """
-        await self._run(
-            query,
+        res = await tx.run(hz_check, h_id=hazard_id)
+        rec = await res.single()
+        if not rec:
+            raise ValueError(f"Hazard node {hazard_id} does not exist")
+        labels = rec["labels"] or []
+        if "Hazard" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
+            raise ValueError(f"Hazard node {hazard_id} has incorrect type/scenario")
+
+        # Validate Vehicle
+        v_check = """
+        MATCH (n {id: $v_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id
+        """
+        res = await tx.run(v_check, v_id=vehicle_id)
+        rec = await res.single()
+        if not rec:
+            raise ValueError(f"Vehicle node {vehicle_id} does not exist")
+        labels = rec["labels"] or []
+        if "Vehicle" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
+            raise ValueError(f"Vehicle node {vehicle_id} has incorrect type/scenario")
+
+        # Validate RoadSegment
+        if road_segment_id:
+            r_check = """
+            MATCH (n {id: $r_id})
+            RETURN labels(n) as labels, n.scenario_id as scenario_id
+            """
+            res = await tx.run(r_check, r_id=road_segment_id)
+            rec = await res.single()
+            if not rec:
+                raise ValueError(f"RoadSegment node {road_segment_id} does not exist")
+            labels = rec["labels"] or []
+            if "RoadSegment" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
+                raise ValueError(f"RoadSegment node {road_segment_id} has incorrect type/scenario")
+
+        # Check existing Warning (Retry / Idempotency)
+        warn_check = """
+        MATCH (w {id: $w_id})
+        RETURN labels(w) as labels, w.scenario_id as scenario_id, w.text as text, w.language as language, w.roadSegmentId as roadSegmentId
+        """
+        res = await tx.run(warn_check, w_id=warning_id)
+        rec = await res.single()
+        if rec:
+            labels = rec["labels"] or []
+            if "Warning" not in labels or "SentinelPerception" not in labels or rec["scenario_id"] != SCENARIO_ID:
+                raise ValueError(f"Warning node {warning_id} has incorrect type/scenario")
+
+            if rec["text"] != warning_text or rec["language"] != language:
+                raise ValueError("Warning properties conflict with existing warning node")
+
+            if rec["roadSegmentId"] != road_segment_id:
+                raise ValueError("Warning road segment association conflicts with existing warning")
+
+            # Verify TRIGGERED_WARNING and DELIVERED_TO relationships
+            rel_check = """
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w:SentinelPerception:Warning {id: $w_id, scenario_id: $scenario_id})
+            MATCH (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            RETURN count(w) > 0 as rels_exist
+            """
+            res_rels = await tx.run(rel_check, h_id=hazard_id, w_id=warning_id, v_id=vehicle_id, scenario_id=SCENARIO_ID)
+            rec_rels = await res_rels.single()
+            if not rec_rels or not rec_rels["rels_exist"]:
+                raise ValueError("Warning relationships conflict with existing warning node")
+
+            if road_segment_id:
+                app_check = """
+                MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})-[:APPROACHING {scenario_id: $scenario_id}]->(r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+                RETURN count(v) > 0 as app_exists
+                """
+                res_app = await tx.run(app_check, v_id=vehicle_id, r_id=road_segment_id, scenario_id=SCENARIO_ID)
+                rec_app = await res_app.single()
+                if not rec_app or not rec_app["app_exists"]:
+                    raise ValueError("APPROACHING relationship conflicts with existing warning state")
+
+            return
+
+        # Create Warning and relationships
+        create_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+        CREATE (w:SentinelPerception:Warning {
+            id: $w_id,
+            scenario_id: $scenario_id,
+            text: $text,
+            language: $lang,
+            timestamp: $timestamp,
+            roadSegmentId: $road_segment_id
+        })
+        CREATE (h)-[:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w)
+        CREATE (w)-[:DELIVERED_TO {scenario_id: $scenario_id}]->(v)
+        """
+        await tx.run(
+            create_query,
+            h_id=hazard_id,
+            v_id=vehicle_id,
             w_id=warning_id,
             text=warning_text,
             lang=language,
             timestamp=ts,
-            h_id=hazard_id,
-            v_id=vehicle_id,
+            road_segment_id=road_segment_id,
             scenario_id=SCENARIO_ID,
         )
 
         if road_segment_id:
-            query2 = """
-            MERGE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
-            MERGE (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
+            app_query = """
+            MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            MATCH (r:SentinelPerception:RoadSegment {id: $r_id, scenario_id: $scenario_id})
             MERGE (v)-[:APPROACHING {scenario_id: $scenario_id}]->(r)
             """
-            await self._run(
-                query2,
+            await tx.run(
+                app_query,
                 v_id=vehicle_id,
                 r_id=road_segment_id,
                 scenario_id=SCENARIO_ID,
@@ -1985,17 +2138,53 @@ class PerceptionGraphService:
         road_segment_id: Optional[str] = None,
         timestamp: Optional[float] = None,
     ) -> None:
-        return await self._execute(
-            self._neo4j.record_warning,
-            self._memory.record_warning,
-            warning_id=warning_id,
-            hazard_id=hazard_id,
-            vehicle_id=vehicle_id,
-            warning_text=warning_text,
-            language=language,
-            road_segment_id=road_segment_id,
-            timestamp=timestamp,
-        )
+        import math
+
+        # 5. Public Input Validation
+        if not warning_id or not isinstance(warning_id, str) or not warning_id.strip():
+            raise ValueError("warning_id must be a non-empty string")
+        if not hazard_id or not isinstance(hazard_id, str) or not hazard_id.strip():
+            raise ValueError("hazard_id must be a non-empty string")
+        if not vehicle_id or not isinstance(vehicle_id, str) or not vehicle_id.strip():
+            raise ValueError("vehicle_id must be a non-empty string")
+        if not warning_text or not isinstance(warning_text, str) or not warning_text.strip():
+            raise ValueError("warning_text must be a non-empty string")
+        if language not in ("en", "hi", "hinglish"):
+            raise ValueError("language must be en, hi, or hinglish")
+        if road_segment_id is not None and (not isinstance(road_segment_id, str) or not road_segment_id.strip()):
+            raise ValueError("road_segment_id must be a non-empty string")
+        if timestamp is not None:
+            if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or timestamp < 0.0:
+                raise ValueError("timestamp must be a finite non-boolean number >= 0")
+
+        # 1. Same-backend warning write
+        if self._mode == "neo4j":
+            try:
+                return await self._neo4j.record_warning(
+                    warning_id=warning_id,
+                    hazard_id=hazard_id,
+                    vehicle_id=vehicle_id,
+                    warning_text=warning_text,
+                    language=language,
+                    road_segment_id=road_segment_id,
+                    timestamp=timestamp,
+                )
+            except ValueError:
+                raise
+            except Exception as e:
+                if self._strict:
+                    self._neo4j_connected = False
+                raise RuntimeError("Neo4j warning write failed") from None
+        else:
+            return await self._memory.record_warning(
+                warning_id=warning_id,
+                hazard_id=hazard_id,
+                vehicle_id=vehicle_id,
+                warning_text=warning_text,
+                language=language,
+                road_segment_id=road_segment_id,
+                timestamp=timestamp,
+            )
 
     async def get_observation_hazard(
         self,
