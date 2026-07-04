@@ -1,16 +1,20 @@
+from __future__ import annotations
+
 """Comprehensive integration and contract tests for Sentinel Dataset Replay.
 
 Fulfills Workstream 13: Minimum new executable coverage (30 points).
 No internet, no real Qwen, no real Neo4j, no MongoDB server required.
 """
-from __future__ import annotations
+import os
+import sys
+# Clear external Neo4j configuration before any import to force memory mode in global service
+os.environ["SENTINEL_NEO4J_STRICT"] = "false"
+os.environ["NEO4J_ENABLED"] = "false"
 
 import asyncio
 import json
 import logging
-import os
 import tempfile
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
