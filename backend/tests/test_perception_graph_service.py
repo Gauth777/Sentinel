@@ -759,9 +759,12 @@ async def test_constraints_attempted(fake_neo4j_module, monkeypatch, clear_neo4j
             if "CONSTRAINT" in query.upper():
                 constraint_queries.append(query)
 
-    assert len(constraint_queries) == 5
+    assert len(constraint_queries) == 7
+    node_constraints = [q for q in constraint_queries if "REQUIRE (n.scenario_id, n.id) IS UNIQUE" in q]
+    rel_constraints = [q for q in constraint_queries if "REQUIRE r.feedback_id IS UNIQUE" in q]
+    assert len(node_constraints) == 5
+    assert len(rel_constraints) == 2
     for q in constraint_queries:
-        assert "REQUIRE (n.scenario_id, n.id) IS UNIQUE" in q
         assert "IS UNIQUE" in q
         assert ":SentinelPerception" not in q
 

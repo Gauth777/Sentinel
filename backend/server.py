@@ -740,7 +740,7 @@ async def confirm_hazard(hazard_id: str):
             feedback_type="confirm",
         )
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail="Invalid feedback request")
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail="Graph database error")
     except Exception as e:
@@ -764,7 +764,7 @@ async def report_incorrect(hazard_id: str):
             feedback_type="report_incorrect",
         )
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail="Invalid feedback request")
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail="Graph database error")
     except Exception as e:

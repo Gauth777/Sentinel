@@ -463,8 +463,7 @@ class _InMemoryGraphBackend:
         feedback_type: str,
         timestamp: Optional[float] = None,
     ) -> Optional[dict]:
-        ts = timestamp if timestamp is not None else 0.0
-
+        import math
         async with self._lock:
             hz_node = self._nodes.get(hazard_id)
             if not hz_node or hz_node.get("scenarioId") != SCENARIO_ID:
@@ -483,14 +482,15 @@ class _InMemoryGraphBackend:
             edge_id = f"{edge_type}:{vehicle_id}:{hazard_id}"
 
             feedback_created = False
-            existing_edge = self._edges.get(edge_id)
             det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
 
-            if existing_edge:
-                props = existing_edge.get("properties", {})
-                if props.get("feedback_id") != det_feedback_id or not isinstance(props.get("created_at"), (int, float)):
-                    raise ValueError("Existing relationship is malformed or has conflicting properties")
-            else:
+            # Locate all relationships of type edge_type from voter to Hazard
+            matching_rels = []
+            for eid, e in self._edges.items():
+                if e["type"] == edge_type and e["source"] == vehicle_id and e["target"] == hazard_id:
+                    matching_rels.append(e)
+
+            if len(matching_rels) == 0:
                 self._merge_edge_sync(
                     edge_id,
                     edge_type,
@@ -499,10 +499,33 @@ class _InMemoryGraphBackend:
                     {
                         "scenario_id": SCENARIO_ID,
                         "feedback_id": det_feedback_id,
-                        "created_at": ts,
+                        "created_at": timestamp,
                     }
                 )
                 feedback_created = True
+            elif len(matching_rels) == 1:
+                rel = matching_rels[0]
+                props = rel.get("properties", {})
+                c_at = props.get("created_at")
+
+                is_valid_created_at = (
+                    not isinstance(c_at, bool)
+                    and isinstance(c_at, (int, float))
+                    and math.isfinite(c_at)
+                    and c_at >= 0.0
+                )
+
+                if (
+                    props.get("scenario_id") != SCENARIO_ID
+                    or props.get("feedback_id") != det_feedback_id
+                    or not is_valid_created_at
+                    or rel["source"] != vehicle_id
+                    or rel["target"] != hazard_id
+                    or rel["type"] != edge_type
+                ):
+                    raise ValueError("Existing feedback relationship is malformed or conflicting")
+            else:
+                raise ValueError(f"Multiple relationships of type {edge_type} found between {vehicle_id} and {hazard_id}")
 
             source_vehicles: Set[str] = set()
             for e in self._edges.values():
@@ -551,6 +574,8 @@ class _InMemoryGraphBackend:
             props["reportedIncorrect"] = reported_incorrect_count
             props["confidence"] = confidence
             props["status"] = status
+            if feedback_created:
+                props["feedbackUpdatedAt"] = timestamp
 
             return {
                 "id": hazard_id,
@@ -1204,18 +1229,26 @@ class _Neo4jGraphBackend:
         if self._driver is None:
             return
         constraints = [
-            ("sentinel_vehicle_identity", "Vehicle"),
-            ("sentinel_observation_identity", "Observation"),
-            ("sentinel_hazard_identity", "Hazard"),
-            ("sentinel_roadsegment_identity", "RoadSegment"),
-            ("sentinel_warning_identity", "Warning"),
+            ("sentinel_vehicle_identity", "Vehicle", "node"),
+            ("sentinel_observation_identity", "Observation", "node"),
+            ("sentinel_hazard_identity", "Hazard", "node"),
+            ("sentinel_roadsegment_identity", "RoadSegment", "node"),
+            ("sentinel_warning_identity", "Warning", "node"),
+            ("sentinel_confirmed_feedback_identity", "CONFIRMED", "relationship"),
+            ("sentinel_reported_feedback_identity", "REPORTED_INCORRECT", "relationship"),
         ]
         async with self._driver.session(database=self._database) as session:
-            for name, label in constraints:
-                cypher = (
-                    f"CREATE CONSTRAINT {name} IF NOT EXISTS "
-                    f"FOR (n:{label}) REQUIRE (n.scenario_id, n.id) IS UNIQUE"
-                )
+            for name, target, c_type in constraints:
+                if c_type == "node":
+                    cypher = (
+                        f"CREATE CONSTRAINT {name} IF NOT EXISTS "
+                        f"FOR (n:{target}) REQUIRE (n.scenario_id, n.id) IS UNIQUE"
+                    )
+                else:
+                    cypher = (
+                        f"CREATE CONSTRAINT {name} IF NOT EXISTS "
+                        f"FOR ()-[r:{target}]-() REQUIRE r.feedback_id IS UNIQUE"
+                    )
                 try:
                     await session.run(cypher)
                 except Exception as exc:
@@ -2438,7 +2471,7 @@ class _Neo4jGraphBackend:
         feedback_type: str,
         timestamp: Optional[float] = None,
     ) -> Optional[dict]:
-        ts = timestamp if timestamp is not None else 0.0
+        import math
 
         # 1. Inspect scenario-scoped nodes with the hazard ID
         hz_check = """
@@ -2470,9 +2503,19 @@ class _Neo4jGraphBackend:
         SET h.feedbackRevision = coalesce(h.feedbackRevision, 0) + 1
         RETURN h.feedbackRevision as revision
         """
-        await tx.run(lock_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        res_lock = await tx.run(lock_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        await res_lock.consume()
 
-        # 5. Validate or create the voting Vehicle
+        # 5. Re-read the current Hazard status AFTER obtaining the lock
+        status_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN h.status as status
+        """
+        res_status = await tx.run(status_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        status_record = await res_status.single()
+        post_lock_status = status_record["status"] if (status_record and status_record["status"] is not None) else "active"
+
+        # 6. Validate or create the voting Vehicle
         v_check = """
         MATCH (n {id: $v_id})
         RETURN labels(n) as labels, n.scenario_id as scenario_id
@@ -2498,28 +2541,32 @@ class _Neo4jGraphBackend:
             """
             await tx.run(create_v_query, v_id=vehicle_id, v_label=vehicle_label, scenario_id=SCENARIO_ID)
 
-        # 6. Check existing feedback relationship integrity
-        rel_label = "CONFIRMED" if feedback_type == "confirm" else "REPORTED_INCORRECT"
-        det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
+        # 7. Check existing feedback relationship integrity
+        # Keep separate fixed Cypher branches for CONFIRMED and REPORTED_INCORRECT
+        if feedback_type == "confirm":
+            rel_check = """
+            MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            MATCH (v)-[r:CONFIRMED]->(h)
+            RETURN r.feedback_id as feedback_id, r.created_at as created_at, r.scenario_id as scenario_id
+            """
+            edge_type = "CONFIRMED"
+        else:
+            rel_check = """
+            MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            MATCH (v)-[r:REPORTED_INCORRECT]->(h)
+            RETURN r.feedback_id as feedback_id, r.created_at as created_at, r.scenario_id as scenario_id
+            """
+            edge_type = "REPORTED_INCORRECT"
 
-        rel_check = f"""
-        MATCH (v:SentinelPerception:Vehicle {{id: $v_id, scenario_id: $scenario_id}})
-        MATCH (h:SentinelPerception:Hazard {{id: $h_id, scenario_id: $scenario_id}})
-        MATCH (v)-[r:{rel_label}]->(h)
-        RETURN r.feedback_id as feedback_id, r.created_at as created_at, r.scenario_id as scenario_id
-        """
         res_rel = await tx.run(rel_check, v_id=vehicle_id, h_id=hazard_id, scenario_id=SCENARIO_ID)
         rels = await res_rel.data()
 
         feedback_created = False
-        if rels:
-            if len(rels) != 1:
-                raise ValueError(f"Multiple relationships of type {rel_label} found between {vehicle_id} and {hazard_id}")
-            r_info = rels[0]
-            if r_info["feedback_id"] != det_feedback_id or r_info["scenario_id"] != SCENARIO_ID or not isinstance(r_info["created_at"], (int, float)):
-                raise ValueError("Existing feedback relationship is malformed or conflicting")
-        else:
-            # 7. Create the relationship only when absent
+        det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
+
+        if len(rels) == 0:
             if feedback_type == "confirm":
                 create_rel_query = """
                 MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
@@ -2546,9 +2593,26 @@ class _Neo4jGraphBackend:
                 h_id=hazard_id,
                 scenario_id=SCENARIO_ID,
                 feedback_id=det_feedback_id,
-                created_at=ts,
+                created_at=timestamp,
             )
             feedback_created = True
+        elif len(rels) == 1:
+            rel = rels[0]
+            c_at = rel.get("created_at")
+            is_valid_created_at = (
+                not isinstance(c_at, bool)
+                and isinstance(c_at, (int, float))
+                and math.isfinite(c_at)
+                and c_at >= 0.0
+            )
+            if (
+                rel.get("scenario_id") != SCENARIO_ID
+                or rel.get("feedback_id") != det_feedback_id
+                or not is_valid_created_at
+            ):
+                raise ValueError("Existing feedback relationship is malformed or conflicting")
+        else:
+            raise ValueError(f"Multiple relationships of type {edge_type} found between {vehicle_id} and {hazard_id}")
 
         # 8. Count distinct observation source vehicles
         obs_sources_query = """
@@ -2579,13 +2643,12 @@ class _Neo4jGraphBackend:
         rec_reported = await res_reported.single()
         reported_incorrect_count = rec_reported["reportedCount"] if rec_reported else 0
 
-        # 11. Apply the shared confidence/status rule
-        existing_status = hz_info["status"] or "active"
+        # 11. Apply the shared confidence/status rule using post-lock status
         confidence, status = _calculate_confidence_and_status(
             source_count=source_count,
             confirmed=confirmed_count,
             reported_incorrect=reported_incorrect_count,
-            existing_status=existing_status,
+            existing_status=post_lock_status,
         )
 
         # 12. Update hazard
@@ -2607,7 +2670,7 @@ class _Neo4jGraphBackend:
                 reportedIncorrect=reported_incorrect_count,
                 confidence=confidence,
                 status=status,
-                feedback_timestamp=ts,
+                feedback_timestamp=timestamp,
                 scenario_id=SCENARIO_ID,
             )
         else:
@@ -2975,6 +3038,7 @@ class PerceptionGraphService:
         feedback_type: str,
         timestamp: Optional[float] = None,
     ) -> Optional[dict]:
+        import time
         import math
         # 1. Validation
         if not hazard_id or not isinstance(hazard_id, str) or not hazard_id.strip():
@@ -2988,6 +3052,9 @@ class PerceptionGraphService:
         if timestamp is not None:
             if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or timestamp < 0.0:
                 raise ValueError("timestamp must be None or a finite non-boolean number >= 0")
+            ts_to_pass = float(timestamp)
+        else:
+            ts_to_pass = time.time()
 
         # 2. Call backend
         if self._mode == "neo4j":
@@ -2997,13 +3064,14 @@ class PerceptionGraphService:
                     vehicle_id=vehicle_id,
                     vehicle_label=vehicle_label,
                     feedback_type=feedback_type,
-                    timestamp=timestamp,
+                    timestamp=ts_to_pass,
                 )
             except ValueError:
                 raise
             except Exception as e:
-                logger.error(f"Neo4j feedback write failed: {e}", exc_info=True)
-                raise RuntimeError(f"Neo4j feedback write failed: {e}") from e
+                # Log only the exception type
+                logger.error(f"Neo4j feedback write failed due to: {type(e).__name__}")
+                raise RuntimeError("Neo4j feedback write failed")
 
         else:
             return await self._memory.record_hazard_feedback(
@@ -3011,7 +3079,7 @@ class PerceptionGraphService:
                 vehicle_id=vehicle_id,
                 vehicle_label=vehicle_label,
                 feedback_type=feedback_type,
-                timestamp=timestamp,
+                timestamp=ts_to_pass,
             )
 
     async def get_observation_hazard(
