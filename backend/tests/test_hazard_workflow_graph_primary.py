@@ -594,42 +594,48 @@ def test_24_demo_route_dependency_injection():
     assert "graph_service=" in content
     assert "ego_location=" in content
 
-# 25. Existing replay activation contracts continue to pass.
 @pytest.mark.anyio
-async def test_25_replay_activation_contracts():
+async def test_25_replay_activation_contracts(graph_service):
     from services.replay_activation_service import activate_inference
     from models.vision_inference import InferenceResult, StructuredRoadPrediction, RuntimeHazardPrediction, InferenceMode
-    
-    pred = StructuredRoadPrediction(
-        road_type="urban_arterial",
-        traffic_density="high",
-        road_complexity="complex",
-        hazard_presence="yes",
-        anticipated_risk="high",
-        recommended_action="slow_down"
-    )
-    runtime_hz = RuntimeHazardPrediction(
-        hazard_type="crossing_vehicle",
-        hazard_description="Vehicle crossing from side",
-        confidence=0.82
-    )
-    result = InferenceResult(
-        inference_id="inf-test-25",
-        sample_id="sample-25",
-        model="Qwen2.5-VL-7B-Instruct",
-        prompt_version="v1",
-        inference_mode=InferenceMode.cached_qwen,
-        prediction=pred,
-        runtime_hazard=runtime_hz,
-        latency_ms=0
-    )
-    
-    location = {"latitude": 12.9450, "longitude": 80.1503}
-    
-    activation = await activate_inference(result, location)
-    assert activation.activated is True
-    assert activation.warning_text_generated is True
-    assert activation.warning_event_created is True
+    import server
+
+    await graph_service.reset_demo_data()
+    orig_graph = server._perception_graph
+    server._perception_graph = graph_service
+    try:
+        pred = StructuredRoadPrediction(
+            road_type="urban_arterial",
+            traffic_density="high",
+            road_complexity="complex",
+            hazard_presence="yes",
+            anticipated_risk="high",
+            recommended_action="slow_down"
+        )
+        runtime_hz = RuntimeHazardPrediction(
+            hazard_type="crossing_vehicle",
+            hazard_description="Vehicle crossing from side",
+            confidence=0.82
+        )
+        result = InferenceResult(
+            inference_id="inf-test-25",
+            sample_id="sample-25",
+            model="Qwen2.5-VL-7B-Instruct",
+            prompt_version="v1",
+            inference_mode=InferenceMode.cached_qwen,
+            prediction=pred,
+            runtime_hazard=runtime_hz,
+            latency_ms=0
+        )
+
+        location = {"latitude": 12.9450, "longitude": 80.1503}
+
+        activation = await activate_inference(result, location)
+        assert activation.activated is True
+        assert activation.warning_text_generated is True
+        assert activation.warning_event_created is True
+    finally:
+        server._perception_graph = orig_graph
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +722,7 @@ async def test_replay_metadata_validation(graph_service):
 
 @pytest.mark.anyio
 async def test_preserve_matched_hazard_label(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     
     # Process first observation with custom label
@@ -744,7 +751,16 @@ async def test_preserve_matched_hazard_label(graph_service):
     assert res2["label"] == "Deep Pothole"
 
 
+@pytest.mark.anyio
+async def test_legacy_read_cache_handling():
+    # Retired in Stage C2: Mongo read caching was completely removed.
+    pass
 
+
+@pytest.mark.anyio
+async def test_legacy_read_cache_failure_does_not_rollback_graph():
+    # Retired in Stage C2: Mongo read caching was completely removed.
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +769,7 @@ async def test_preserve_matched_hazard_label(graph_service):
 
 @pytest.mark.anyio
 async def test_b2a_basic_warning_event_creation(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-1",
@@ -776,6 +793,7 @@ async def test_b2a_basic_warning_event_creation(graph_service):
 
 @pytest.mark.anyio
 async def test_b2a_idempotent_duplicate_observation(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-2",
@@ -798,6 +816,7 @@ async def test_b2a_idempotent_duplicate_observation(graph_service):
 
 @pytest.mark.anyio
 async def test_b2a_warning_failure_is_non_fatal(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-3",

@@ -358,8 +358,10 @@ async def run_verification():
 
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (v:Vehicle {id: 'v-2'})-[r:CONFIRMED]->(h:Hazard {id: $h_id}) RETURN r.created_at as created_at, count(r) as r_count",
-                h_id=hz_c2_id
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-2', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN r.created_at as created_at, count(r) as r_count",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
             )
             rec = await res.single()
             assert rec is not None
@@ -371,8 +373,9 @@ async def run_verification():
         # C2 Check 3: feedback preserves Hazard.created_at and Hazard.updated_at
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (h:Hazard {id: $h_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
-                h_id=hz_c2_id
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
             )
             rec = await res.single()
             assert rec is not None
@@ -388,8 +391,9 @@ async def run_verification():
             )
 
             res_after = await session.run(
-                "MATCH (h:Hazard {id: $h_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
-                h_id=hz_c2_id
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
             )
             rec_after = await res_after.single()
             assert rec_after is not None
@@ -405,8 +409,10 @@ async def run_verification():
 
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (v:Vehicle {id: 'v-4'})-[r:CONFIRMED]->(h:Hazard {id: $h_id}) RETURN count(r) as r_count, r.created_at as created_at",
-                h_id=hz_c2_id
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-4', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as r_count, r.created_at as created_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
             )
             rec = await res.single()
             assert rec is not None
@@ -420,8 +426,10 @@ async def run_verification():
 
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (h:Hazard {id: $h_id}) RETURN h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.sourceCount as sourceCount",
-                h_id=hz_c2_id
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.sourceCount as sourceCount",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
             )
             rec = await res.single()
             assert rec is not None
@@ -430,7 +438,7 @@ async def run_verification():
             assert rec["sourceCount"] == 1, f"Expected 1 sourceCount, got {rec['sourceCount']}"
         print("PASS: Concurrent identical/different voters produce exact counts")
 
-        # C2 Check 5: the 4-report + concurrent-confirm race remains resolved
+        # C2 Check 5: sequential monotonicity check
         runner_race = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9200, "longitude": 80.1200})
         obs_race = {
             "id": "obs-race-verify",
@@ -447,7 +455,11 @@ async def run_verification():
             await graph_service.record_hazard_feedback(hz_race_id, voter, "Voter", "report_incorrect")
 
         async with driver.session(database=db_name) as session:
-            res = await session.run("MATCH (h:Hazard {id: $h_id}) RETURN h.status as status", h_id=hz_race_id)
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status",
+                h_id=hz_race_id,
+                scenario_id=SCENARIO_ID
+            )
             assert (await res.single())["status"] == "active"
 
         # Execute sequentially to verify that once resolved, confirmation preserves the resolved state
@@ -456,8 +468,10 @@ async def run_verification():
 
         async with driver.session(database=db_name) as session:
             res = await session.run(
-                "MATCH (h:Hazard {id: $h_id}) RETURN h.status as status, h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.confidence as confidence",
-                h_id=hz_race_id
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.status as status, h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.confidence as confidence",
+                h_id=hz_race_id,
+                scenario_id=SCENARIO_ID
             )
             rec = await res.single()
             assert rec is not None
@@ -465,7 +479,7 @@ async def run_verification():
             assert rec["confirmed"] == 1, f"Expected confirmed == 1, got {rec['confirmed']}"
             assert rec["reportedIncorrect"] == 4, f"Expected reportedIncorrect == 4, got {rec['reportedIncorrect']}"
             assert rec["confidence"] == 10, f"Expected confidence == 10, got {rec['confidence']}"
-        print("PASS: Concurrent 4-report and 1-confirm race remains resolved (post-lock monotonicity verified)")
+        print("PASS: Sequential monotonicity check: resolved hazard remains resolved after subsequent confirmation")
 
         # C2 Check 6: five distinct reports resolve a separate hazard
         runner_five = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9300, "longitude": 80.1300})
@@ -484,7 +498,11 @@ async def run_verification():
             await graph_service.record_hazard_feedback(hz_five_id, voter, "Voter", "report_incorrect")
 
         async with driver.session(database=db_name) as session:
-            res = await session.run("MATCH (h:Hazard {id: $h_id}) RETURN h.status as status, h.reportedIncorrect as reportedIncorrect", h_id=hz_five_id)
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status, h.reportedIncorrect as reportedIncorrect",
+                h_id=hz_five_id,
+                scenario_id=SCENARIO_ID
+            )
             rec = await res.single()
             assert rec is not None
             assert rec["reportedIncorrect"] == 5, f"Expected 5 reports, got {rec['reportedIncorrect']}"
@@ -507,7 +525,11 @@ async def run_verification():
         await graph_service.record_hazard_feedback(hz_corrob_id, "v-2", "Voter", "confirm")
 
         async with driver.session(database=db_name) as session:
-            res = await session.run("MATCH (h:Hazard {id: $h_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount", h_id=hz_corrob_id)
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount",
+                h_id=hz_corrob_id,
+                scenario_id=SCENARIO_ID
+            )
             rec = await res.single()
             assert rec is not None
             assert rec["confirmed"] == 1
@@ -525,7 +547,11 @@ async def run_verification():
         await runner_corrob.process_observation(obs_corrob_2)
 
         async with driver.session(database=db_name) as session:
-            res = await session.run("MATCH (h:Hazard {id: $h_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount", h_id=hz_corrob_id)
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount",
+                h_id=hz_corrob_id,
+                scenario_id=SCENARIO_ID
+            )
             rec = await res.single()
             assert rec is not None
             assert rec["confirmed"] == 1, "Expected confirmation count to be preserved"
@@ -535,7 +561,10 @@ async def run_verification():
 
         # C2 Check 8: unknown-hazard feedback creates no Hazard or Vehicle
         async with driver.session(database=db_name) as session:
-            await session.run("MATCH (v:Vehicle {id: 'v-c2-unknown-voter'}) DETACH DELETE v")
+            await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-c2-unknown-voter', scenario_id: $scenario_id}) DETACH DELETE v",
+                scenario_id=SCENARIO_ID
+            )
 
         res_unk = await graph_service.record_hazard_feedback(
             hazard_id="hz-c2-unknown",
@@ -546,10 +575,16 @@ async def run_verification():
         assert res_unk is None
 
         async with driver.session(database=db_name) as session:
-            res_hz = await session.run("MATCH (h:Hazard {id: 'hz-c2-unknown'}) RETURN count(h) as count")
+            res_hz = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: 'hz-c2-unknown', scenario_id: $scenario_id}) RETURN count(h) as count",
+                scenario_id=SCENARIO_ID
+            )
             assert (await res_hz.single())["count"] == 0
 
-            res_v = await session.run("MATCH (v:Vehicle {id: 'v-c2-unknown-voter'}) RETURN count(v) as count")
+            res_v = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-c2-unknown-voter', scenario_id: $scenario_id}) RETURN count(v) as count",
+                scenario_id=SCENARIO_ID
+            )
             assert (await res_v.single())["count"] == 0
         print("PASS: Unknown hazard feedback creates no Hazard or Vehicle")
 
@@ -595,6 +630,70 @@ async def run_verification():
             assert rec["created_at"] == 54321.09, f"Expected created_at to be preserved at 54321.09, got {rec['created_at']}"
             assert isinstance(rec["created_at"], float) and not isinstance(rec["created_at"], bool) and math.isfinite(rec["created_at"]) and rec["created_at"] > 0
         print("PASS: Duplicate report creates one relationship and retry preserves created_at")
+
+        # C2 Check 11: Real AuraDB concurrency check on resolved hazard
+        runner_concur = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9500, "longitude": 80.1500})
+        obs_concur = {
+            "id": "obs-concur-verify",
+            "type": "pothole",
+            "label": "Pothole Concur",
+            "location": {"latitude": 12.9500, "longitude": 80.1500},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_concur = await runner_concur.process_observation(obs_concur)
+        hz_concur_id = res_concur["id"]
+
+        # Resolve the hazard first by submitting 5 incorrect reports from v-1 to v-5
+        for voter in ("v-1", "v-2", "v-3", "v-4", "v-5"):
+            await graph_service.record_hazard_feedback(hz_concur_id, voter, "Voter", "report_incorrect")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res.single())["status"] == "resolved"
+
+        # Concurrently submit: confirmation from v-concur-c and incorrect report from v-concur-r
+        await asyncio.gather(
+            graph_service.record_hazard_feedback(hz_concur_id, "v-concur-c", "Sentinel-C", "confirm"),
+            graph_service.record_hazard_feedback(hz_concur_id, "v-concur-r", "Sentinel-R", "report_incorrect")
+        )
+
+        async with driver.session(database=db_name) as session:
+            # Verify both relationships exist exactly once
+            res_c = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-concur-c', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as count",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_c.single())["count"] == 1
+
+            res_r = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-concur-r', scenario_id: $scenario_id})-[r:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as count",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_r.single())["count"] == 1
+
+            # Verify final counters are exact, status remains resolved, and no stale aggregate properties remain
+            res_hz = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.status as status, h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.confidence as confidence",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec_hz = await res_hz.single()
+            assert rec_hz is not None
+            assert rec_hz["status"] == "resolved"
+            assert rec_hz["confirmed"] == 1
+            assert rec_hz["reportedIncorrect"] == 6
+            assert rec_hz["confidence"] == 0
+        print("PASS: Real AuraDB concurrency check: concurrent confirm and report on resolved hazard leaves it resolved with exact counters")
 
         # 13. Print final successful counts
         async with driver.session(database=db_name) as session:

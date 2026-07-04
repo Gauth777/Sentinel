@@ -1184,3 +1184,103 @@ async def test_memory_fallback_integrity_harden(memory_service):
     assert edge["properties"]["created_at"] == 3000.0
     hz = memory_service._memory._nodes["hz-harden-1"]
     assert hz["properties"]["feedbackUpdatedAt"] == 3000.0
+
+
+@pytest.mark.anyio
+async def test_neo4j_post_lock_monotonicity_callback():
+    from services.perception_graph_service import PerceptionGraphService, SCENARIO_ID
+    from unittest.mock import AsyncMock
+
+    # Initialize Neo4j backend facade
+    service = PerceptionGraphService()
+    backend = service._neo4j
+
+    # Mock transaction object
+    tx = AsyncMock()
+    run_calls = []
+
+    class MockResult:
+        def __init__(self, data_list):
+            self._data = data_list
+
+        async def data(self):
+            return self._data
+
+        async def consume(self):
+            pass
+
+        async def single(self):
+            if self._data:
+                return self._data[0]
+            return None
+
+        def __aiter__(self):
+            async def gen():
+                for item in self._data:
+                    yield item
+            return gen()
+
+    async def mock_tx_run(query, **kwargs):
+        run_calls.append((query, kwargs))
+        q = query.strip()
+        if "MATCH (n {id: $h_id})" in q:
+            # 1. Initial inspect (reports status active)
+            return MockResult([{"labels": ["SentinelPerception", "Hazard"], "scenario_id": SCENARIO_ID, "status": "active"}])
+        elif "feedbackRevision" in q:
+            # 4. Write-lock query
+            return MockResult([])
+        elif "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})" in q and "status" in q and "feedbackRevision" not in q:
+            # 5. Post-lock status read (reports resolved!)
+            return MockResult([{"status": "resolved"}])
+        elif "MATCH (n {id: $v_id})" in q:
+            # 6. Validate/create vehicle
+            return MockResult([{"labels": ["SentinelPerception", "Vehicle"], "scenario_id": SCENARIO_ID}])
+        elif "r.feedback_id as feedback_id" in q:
+            # 7. Check existing feedback relationship
+            return MockResult([])
+        elif "CREATE" in q:
+            # 7. Create feedback relationship
+            return MockResult([])
+        elif "obs:SentinelPerception:Observation" in q:
+            # 8. Count distinct observation sources
+            return MockResult([{"sourceCount": 1}])
+        elif "confirmedCount" in q:
+            # 9. Count confirmed voters
+            return MockResult([{"confirmedCount": 1}])
+        elif "reportedCount" in q:
+            # 10. Count reported incorrect voters
+            return MockResult([{"reportedCount": 4}])
+        elif "SET h.sourceCount =" in q:
+            # 12. Update hazard
+            return MockResult([])
+        return MockResult([])
+
+    tx.run = AsyncMock(side_effect=mock_tx_run)
+
+    res = await backend._record_hazard_feedback_tx(
+        tx=tx,
+        hazard_id="hz-race-mock",
+        vehicle_id="v-voter-mock",
+        vehicle_label="Voter",
+        feedback_type="confirm",
+        timestamp=12345.0
+    )
+
+    assert res is not None
+    assert res["status"] == "resolved"
+    assert res["confirmed"] == 1
+    assert res["reportedIncorrect"] == 4
+    assert res["confidence"] == 10
+
+    # Ensure the final update query set status to "resolved" using the post-lock read status
+    update_call = None
+    for q, kwargs in run_calls:
+        if "SET h.sourceCount =" in q:
+            update_call = kwargs
+            break
+
+    assert update_call is not None
+    assert update_call["status"] == "resolved"
+    assert update_call["confidence"] == 10
+    assert update_call["confirmed"] == 1
+    assert update_call["reportedIncorrect"] == 4
