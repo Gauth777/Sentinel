@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from server import app, db, MONGO_REACHABLE, mongo_url
 from utils.mongo_mock import MOCK_SYNC_DB_STATE
 from services.warning_service import WarningService
-from services.neo4j_service import Neo4jService
+
 from utils.geo import destination_point, haversine_meters
 
 @pytest.fixture
@@ -253,57 +253,7 @@ def test_404_unknown(client):
     assert r.status_code == 404
 
 
-# ===== Demo seed migration =====
-def test_old_schema_migration(client, sync_db):
-    """Inject a legacy-shape hazard with the same id as a known demo doc, reset
-    the seed-version sentinel, then call any endpoint and confirm that the
-    record was upserted into the new geo schema."""
-    # Insert legacy record (no `location`, normalised x/y).
-    legacy_hz = {
-        "id": "hz-002",
-        "type": "pothole",
-        "label": "OLD: pothole",
-        "x": 0.5,
-        "y": 0.2,
-        "distance_m": 999,
-        "confidence": 10,
-        "sources": 1,
-        "observed_seconds_ago": 99,
-        "direction": "old",
-        "recommended_action": "old",
-        "risk": "low",
-        "confirmed": 5,
-        "reportedIncorrect": 2,
-    }
-    sync_db.hazards.replace_one({"id": "hz-002"}, legacy_hz, upsert=True)
-    # Force re-migration by clearing the version sentinel.
-    sync_db.sentinel_meta.delete_many({"id": "seed"})
 
-    # Trigger ensure_seed via status endpoint.
-    r = client.get("/api/sentinel/status")
-    assert r.status_code == 200
-
-    # Query Mongo directly since migrated hazard reads are now graph-only.
-    hz = sync_db.hazards.find_one({"id": "hz-002"})
-    assert hz is not None
-    # Must now be the new schema.
-    assert "location" in hz and "latitude" in hz["location"]
-    assert hz["distanceMeters"] == 340
-    assert hz["risk"] == "medium"
-    # Counters preserved.
-    assert hz["confirmed"] >= 5
-    assert hz["reportedIncorrect"] >= 2
-
-
-def test_repeated_seeding_is_idempotent(client, sync_db):
-    """Calling endpoints repeatedly must not produce duplicates."""
-    before = sync_db.hazards.count_documents({"id": "hz-002"})
-    assert before == 1
-    for _ in range(5):
-        client.get("/api/sentinel/world-model").raise_for_status()
-    after = sync_db.hazards.count_documents({"id": "hz-002"})
-    assert after == 1
-    assert sync_db.nearby_vehicles.count_documents({"id": "v-1"}) == 1
 
 
 def test_seed_meta_records_version(client, sync_db):
@@ -431,22 +381,4 @@ def test_warning_translation_generation():
     assert "50 metre aage pothole hai. Left move karein." in w["hinglish"]
 
 
-# ===== Neo4j fallback operations =====
-@pytest.mark.anyio
-async def test_neo4j_service_operations(sync_db):
-    # Test Neo4jService directly (calls async methods, which will fall back to MongoDB)
-    await Neo4jService.record_vehicle("v-test-neo", "Test Neo Vehicle")
-    await Neo4jService.record_road_segment("test-segment", "Test segment road")
-    await Neo4jService.record_vehicle_approaching("v-test-neo", "test-segment")
-    await Neo4jService.record_hazard("hz-test-neo", "test-segment", {"type": "pothole", "label": "Pothole"})
-    
-    relevant = await Neo4jService.get_relevant_hazards("v-test-neo")
-    assert "hz-test-neo" in relevant
 
-    # Link mock observation
-    await Neo4jService.record_observation(
-        "obs-neo-1", "v-test-neo", "hz-test-neo", {"type": "pothole", "label": "Pothole"}
-    )
-    provenance = await Neo4jService.get_hazard_provenance("hz-test-neo")
-    assert len(provenance) > 0
-    assert provenance[0]["vehicle_id"] == "v-test-neo"

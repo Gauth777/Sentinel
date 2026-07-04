@@ -594,42 +594,48 @@ def test_24_demo_route_dependency_injection():
     assert "graph_service=" in content
     assert "ego_location=" in content
 
-# 25. Existing replay activation contracts continue to pass.
 @pytest.mark.anyio
-async def test_25_replay_activation_contracts():
+async def test_25_replay_activation_contracts(graph_service):
     from services.replay_activation_service import activate_inference
     from models.vision_inference import InferenceResult, StructuredRoadPrediction, RuntimeHazardPrediction, InferenceMode
-    
-    pred = StructuredRoadPrediction(
-        road_type="urban_arterial",
-        traffic_density="high",
-        road_complexity="complex",
-        hazard_presence="yes",
-        anticipated_risk="high",
-        recommended_action="slow_down"
-    )
-    runtime_hz = RuntimeHazardPrediction(
-        hazard_type="crossing_vehicle",
-        hazard_description="Vehicle crossing from side",
-        confidence=0.82
-    )
-    result = InferenceResult(
-        inference_id="inf-test-25",
-        sample_id="sample-25",
-        model="Qwen2.5-VL-7B-Instruct",
-        prompt_version="v1",
-        inference_mode=InferenceMode.cached_qwen,
-        prediction=pred,
-        runtime_hazard=runtime_hz,
-        latency_ms=0
-    )
-    
-    location = {"latitude": 12.9450, "longitude": 80.1503}
-    
-    activation = await activate_inference(result, location)
-    assert activation.activated is True
-    assert activation.warning_text_generated is True
-    assert activation.warning_event_created is True
+    import server
+
+    await graph_service.reset_demo_data()
+    orig_graph = server._perception_graph
+    server._perception_graph = graph_service
+    try:
+        pred = StructuredRoadPrediction(
+            road_type="urban_arterial",
+            traffic_density="high",
+            road_complexity="complex",
+            hazard_presence="yes",
+            anticipated_risk="high",
+            recommended_action="slow_down"
+        )
+        runtime_hz = RuntimeHazardPrediction(
+            hazard_type="crossing_vehicle",
+            hazard_description="Vehicle crossing from side",
+            confidence=0.82
+        )
+        result = InferenceResult(
+            inference_id="inf-test-25",
+            sample_id="sample-25",
+            model="Qwen2.5-VL-7B-Instruct",
+            prompt_version="v1",
+            inference_mode=InferenceMode.cached_qwen,
+            prediction=pred,
+            runtime_hazard=runtime_hz,
+            latency_ms=0
+        )
+
+        location = {"latitude": 12.9450, "longitude": 80.1503}
+
+        activation = await activate_inference(result, location)
+        assert activation.activated is True
+        assert activation.warning_text_generated is True
+        assert activation.warning_event_created is True
+    finally:
+        server._perception_graph = orig_graph
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +722,7 @@ async def test_replay_metadata_validation(graph_service):
 
 @pytest.mark.anyio
 async def test_preserve_matched_hazard_label(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     
     # Process first observation with custom label
@@ -746,126 +753,14 @@ async def test_preserve_matched_hazard_label(graph_service):
 
 @pytest.mark.anyio
 async def test_legacy_read_cache_handling():
-    from server import _cache_graph_hazard_for_legacy_reads, db
-    
-    # Clear collection
-    await db.hazards.delete_many({})
-    await db.observations.delete_many({})
-
-    # Mock hazard output
-    hazard_data = {
-        "id": "hz-cache-1",
-        "type": "pothole",
-        "label": "Deep Pothole",
-        "location": {"latitude": 12.9450, "longitude": 80.1503},
-        "polygon": [{"latitude": 12.9451, "longitude": 80.1504}],
-        "distanceMeters": 120.5,
-        "confidence": 80,
-        "sources": 2,
-        "observedSecondsAgo": 5,
-        "direction": "Northbound lane",
-        "recommendedAction": "Move left",
-        "risk": "medium",
-        "visibilityState": "visible",
-        "sourceType": "shared_vehicle",
-        "routeRelevance": "high",
-        "confirmed": 1,
-        "reportedIncorrect": 0,
-        "status": "active",
-        "segment_id": "gst",
-        "warnings": ["Warning Text"],
-        "_warning_events": [{"event": "evt"}],
-        "source_vehicles": ["v-1", "v-2"]
-    }
-
-    # Run caching helper
-    await _cache_graph_hazard_for_legacy_reads(hazard_data)
-
-    # Verify db.observations is never written
-    obs_count = await db.observations.count_documents({})
-    assert obs_count == 0
-
-    # Verify db.hazards contains expected cached record
-    cached = await db.hazards.find_one({"id": "hz-cache-1"}, {"_id": 0})
-    assert cached is not None
-    assert cached["id"] == "hz-cache-1"
-    assert cached["type"] == "pothole"
-    assert cached["label"] == "Deep Pothole"
-    
-    # Verify response-only warning content/warnings/events are not cached
-    assert "warnings" not in cached
-    assert "_warning_events" not in cached
-    
-    # Verify source_vehicles is not cached
-    assert "source_vehicles" not in cached
-
-    # Verify cache failure does not propagate and throw error
-    # Let's mock db.hazards class replace_one to raise Exception
-    hazards_class = db.hazards.__class__
-    original_replace = hazards_class.replace_one
-    async def mock_replace(self_coll, *args, **kwargs):
-        if getattr(self_coll, "name", None) == "hazards":
-            raise RuntimeError("db connection lost")
-        return await original_replace(self_coll, *args, **kwargs)
-    hazards_class.replace_one = mock_replace
-    try:
-        # Calling cache should fail silently and not raise error
-        await _cache_graph_hazard_for_legacy_reads(hazard_data)
-    finally:
-        hazards_class.replace_one = original_replace
+    # Retired in Stage C2: Mongo read caching was completely removed.
+    pass
 
 
 @pytest.mark.anyio
 async def test_legacy_read_cache_failure_does_not_rollback_graph():
-    from fastapi.testclient import TestClient
-    from server import app, db, _perception_graph
-    
-    # Reset
-    await db.hazards.delete_many({})
-    await db.observations.delete_many({})
-    await _perception_graph.reset_demo_data()
-
-    obs = {
-        "id": "obs-cache-fail-1",
-        "type": "pothole",
-        "label": "Pothole",
-        "location": {"latitude": 12.9450, "longitude": 80.1503},
-        "sourceVehicleId": "v-1",
-        "vehicleLabel": "Sentinel Vehicle"
-    }
-
-    # Mock db.hazards class replace_one to fail conditionally
-    mock_enabled = False
-    hazards_class = db.hazards.__class__
-    original_replace = hazards_class.replace_one
-    async def mock_replace(self_coll, *args, **kwargs):
-        if mock_enabled and getattr(self_coll, "name", None) == "hazards":
-            raise RuntimeError("DB connection error")
-        return await original_replace(self_coll, *args, **kwargs)
-    hazards_class.replace_one = mock_replace
-
-    try:
-        with TestClient(app) as c:
-            mock_enabled = True
-            r = c.post("/api/sentinel/demo/observation", json=obs)
-            assert r.status_code == 200
-            res = r.json()
-            assert res["id"] is not None
-            
-            # Verify graph hazard is present
-            graph_hz = await _perception_graph.get_observation_hazard("obs-cache-fail-1")
-            assert graph_hz is not None
-            assert graph_hz["id"] == res["id"]
-            
-            # Verify Mongo hazard is NOT present (because cache write failed)
-            mongo_hz = await db.hazards.find_one({"id": res["id"]})
-            assert mongo_hz is None
-            
-            # Verify db.observations is not written
-            obs_count = await db.observations.count_documents({})
-            assert obs_count == 0
-    finally:
-        hazards_class.replace_one = original_replace
+    # Retired in Stage C2: Mongo read caching was completely removed.
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +769,7 @@ async def test_legacy_read_cache_failure_does_not_rollback_graph():
 
 @pytest.mark.anyio
 async def test_b2a_basic_warning_event_creation(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-1",
@@ -897,6 +793,7 @@ async def test_b2a_basic_warning_event_creation(graph_service):
 
 @pytest.mark.anyio
 async def test_b2a_idempotent_duplicate_observation(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-2",
@@ -919,6 +816,7 @@ async def test_b2a_idempotent_duplicate_observation(graph_service):
 
 @pytest.mark.anyio
 async def test_b2a_warning_failure_is_non_fatal(graph_service):
+    await graph_service.reset_demo_data()
     runner = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9436, "longitude": 80.1502})
     obs = {
         "id": "obs-b2a-3",

@@ -314,6 +314,387 @@ async def run_verification():
 
         print("PASS: Concurrent hazard conflict verified")
 
+        import math
+
+        # C2 Check 1: both feedback relationship constraints exist
+        async with driver.session(database=db_name) as session:
+            res_constraints = await session.run("SHOW CONSTRAINTS")
+            records = await res_constraints.data()
+            constraint_names = {r["name"] for r in records}
+            assert "sentinel_confirmed_feedback_identity" in constraint_names, "Missing sentinel_confirmed_feedback_identity constraint"
+            assert "sentinel_reported_feedback_identity" in constraint_names, "Missing sentinel_reported_feedback_identity constraint"
+        print("PASS: Both feedback relationship constraints exist")
+
+        # C2 Check 2: duplicate confirm/report, exact retry preserves created_at
+        runner_c2 = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9100, "longitude": 80.1100})
+        obs_c2 = {
+            "id": "obs-c2-verify",
+            "type": "pothole",
+            "label": "Pothole C2",
+            "location": {"latitude": 12.9100, "longitude": 80.1100},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_wf_c2 = await runner_c2.process_observation(obs_c2)
+        hz_c2_id = res_wf_c2["id"]
+
+        res_c1 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-2",
+            vehicle_label="Sentinel-C2",
+            feedback_type="confirm",
+            timestamp=12345.67
+        )
+        assert res_c1["feedbackCreated"] is True
+
+        res_c2 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-2",
+            vehicle_label="Sentinel-C2",
+            feedback_type="confirm",
+            timestamp=99999.99
+        )
+        assert res_c2["feedbackCreated"] is False
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-2', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN r.created_at as created_at, count(r) as r_count",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["r_count"] == 1, f"Expected 1 CONFIRMED relationship, got {rec['r_count']}"
+            assert rec["created_at"] == 12345.67, f"Expected created_at to be preserved at 12345.67, got {rec['created_at']}"
+            assert isinstance(rec["created_at"], float) and not isinstance(rec["created_at"], bool) and math.isfinite(rec["created_at"]) and rec["created_at"] > 0
+        print("PASS: Duplicate confirm creates one relationship and retry preserves created_at")
+
+        # C2 Check 3: feedback preserves Hazard.created_at and Hazard.updated_at
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            hz_created_at = rec["created_at"]
+            hz_updated_at = rec["updated_at"]
+
+            await graph_service.record_hazard_feedback(
+                hazard_id=hz_c2_id,
+                vehicle_id="v-3",
+                vehicle_label="Sentinel-F4",
+                feedback_type="confirm",
+                timestamp=55555.55
+            )
+
+            res_after = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.created_at as created_at, h.updated_at as updated_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec_after = await res_after.single()
+            assert rec_after is not None
+            assert rec_after["created_at"] == hz_created_at, "Hazard.created_at was modified by feedback"
+            assert rec_after["updated_at"] == hz_updated_at, "Hazard.updated_at was modified by feedback"
+        print("PASS: Feedback preserves Hazard.created_at and Hazard.updated_at")
+
+        # C2 Check 4: concurrent identical feedback & concurrent different voters
+        await asyncio.gather(
+            graph_service.record_hazard_feedback(hz_c2_id, "v-4", "Sentinel-K9", "confirm", 60000.0),
+            graph_service.record_hazard_feedback(hz_c2_id, "v-4", "Sentinel-K9", "confirm", 70000.0)
+        )
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-4', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as r_count, r.created_at as created_at",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["r_count"] == 1, f"Expected 1 concurrent relationship, got {rec['r_count']}"
+            assert rec["created_at"] in (60000.0, 70000.0), f"Expected one of the timestamps to be preserved, got {rec['created_at']}"
+
+        await asyncio.gather(
+            graph_service.record_hazard_feedback(hz_c2_id, "v-obs", "Sentinel-A8", "report_incorrect", 80000.0),
+            graph_service.record_hazard_feedback(hz_c2_id, "v-1", "Sentinel-A8", "report_incorrect", 81000.0)
+        )
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.sourceCount as sourceCount",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["confirmed"] == 3, f"Expected 3 confirmed, got {rec['confirmed']}"
+            assert rec["reportedIncorrect"] == 2, f"Expected 2 reportedIncorrect, got {rec['reportedIncorrect']}"
+            assert rec["sourceCount"] == 1, f"Expected 1 sourceCount, got {rec['sourceCount']}"
+        print("PASS: Concurrent identical/different voters produce exact counts")
+
+        # C2 Check 5: sequential monotonicity check
+        runner_race = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9200, "longitude": 80.1200})
+        obs_race = {
+            "id": "obs-race-verify",
+            "type": "pothole",
+            "label": "Pothole Race",
+            "location": {"latitude": 12.9200, "longitude": 80.1200},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_race = await runner_race.process_observation(obs_race)
+        hz_race_id = res_race["id"]
+
+        for voter in ("v-2", "v-3", "v-4"):
+            await graph_service.record_hazard_feedback(hz_race_id, voter, "Voter", "report_incorrect")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status",
+                h_id=hz_race_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res.single())["status"] == "active"
+
+        # Execute sequentially to verify that once resolved, confirmation preserves the resolved state
+        await graph_service.record_hazard_feedback(hz_race_id, "v-1", "Voter", "report_incorrect")
+        await graph_service.record_hazard_feedback(hz_race_id, "v-obs", "Voter", "confirm")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.status as status, h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.confidence as confidence",
+                h_id=hz_race_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["status"] == "resolved", f"Expected resolved status, got {rec['status']}"
+            assert rec["confirmed"] == 1, f"Expected confirmed == 1, got {rec['confirmed']}"
+            assert rec["reportedIncorrect"] == 4, f"Expected reportedIncorrect == 4, got {rec['reportedIncorrect']}"
+            assert rec["confidence"] == 10, f"Expected confidence == 10, got {rec['confidence']}"
+        print("PASS: Sequential monotonicity check: resolved hazard remains resolved after subsequent confirmation")
+
+        # C2 Check 6: five distinct reports resolve a separate hazard
+        runner_five = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9300, "longitude": 80.1300})
+        obs_five = {
+            "id": "obs-five-verify",
+            "type": "pothole",
+            "label": "Pothole Five",
+            "location": {"latitude": 12.9300, "longitude": 80.1300},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_five = await runner_five.process_observation(obs_five)
+        hz_five_id = res_five["id"]
+
+        for i, voter in enumerate(["v-1", "v-2", "v-3", "v-4", "v-obs"]):
+            await graph_service.record_hazard_feedback(hz_five_id, voter, "Voter", "report_incorrect")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status, h.reportedIncorrect as reportedIncorrect",
+                h_id=hz_five_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["reportedIncorrect"] == 5, f"Expected 5 reports, got {rec['reportedIncorrect']}"
+            assert rec["status"] == "resolved", f"Expected resolved status, got {rec['status']}"
+        print("PASS: Five distinct reports resolve the hazard")
+
+        # C2 Check 7: later corroborating observation preserves feedback and recalculates confidence
+        runner_corrob = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9400, "longitude": 80.1400})
+        obs_corrob = {
+            "id": "obs-corrob-verify-1",
+            "type": "pothole",
+            "label": "Pothole Corrob",
+            "location": {"latitude": 12.9400, "longitude": 80.1400},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_corrob = await runner_corrob.process_observation(obs_corrob)
+        hz_corrob_id = res_corrob["id"]
+
+        await graph_service.record_hazard_feedback(hz_corrob_id, "v-2", "Voter", "confirm")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount",
+                h_id=hz_corrob_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["confirmed"] == 1
+            assert rec["confidence"] == 70
+            assert rec["sourceCount"] == 1
+
+        obs_corrob_2 = {
+            "id": "obs-corrob-verify-2",
+            "type": "pothole",
+            "label": "Pothole Corrob 2",
+            "location": {"latitude": 12.9400, "longitude": 80.1400},
+            "sourceVehicleId": "v-3",
+            "vehicleLabel": "Sentinel-F4",
+        }
+        await runner_corrob.process_observation(obs_corrob_2)
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.confirmed as confirmed, h.confidence as confidence, h.sourceCount as sourceCount",
+                h_id=hz_corrob_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["confirmed"] == 1, "Expected confirmation count to be preserved"
+            assert rec["confidence"] == 90, f"Expected recalculated confidence to be 90, got {rec['confidence']}"
+            assert rec["sourceCount"] == 2, f"Expected sourceCount to be 2, got {rec['sourceCount']}"
+        print("PASS: Later corroborating observation preserves feedback and recalculates confidence")
+
+        # C2 Check 8: unknown-hazard feedback creates no Hazard or Vehicle
+        async with driver.session(database=db_name) as session:
+            await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-c2-unknown-voter', scenario_id: $scenario_id}) DETACH DELETE v",
+                scenario_id=SCENARIO_ID
+            )
+
+        res_unk = await graph_service.record_hazard_feedback(
+            hazard_id="hz-c2-unknown",
+            vehicle_id="v-c2-unknown-voter",
+            vehicle_label="Unknown Voter",
+            feedback_type="confirm"
+        )
+        assert res_unk is None
+
+        async with driver.session(database=db_name) as session:
+            res_hz = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: 'hz-c2-unknown', scenario_id: $scenario_id}) RETURN count(h) as count",
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_hz.single())["count"] == 0
+
+            res_v = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-c2-unknown-voter', scenario_id: $scenario_id}) RETURN count(v) as count",
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_v.single())["count"] == 0
+        print("PASS: Unknown hazard feedback creates no Hazard or Vehicle")
+
+        # C2 Check 9: build_graph includes feedback edges and voter nodes
+        g = await graph_service.build_graph(hazard_id=hz_c2_id)
+        node_ids = {n["id"] for n in g["nodes"]}
+        edge_types = {e["type"] for e in g["edges"]}
+        assert "v-2" in node_ids, "Voter node v-2 missing from build_graph"
+        assert "CONFIRMED" in edge_types, "CONFIRMED feedback edge missing from build_graph"
+        print("PASS: build_graph includes feedback edges and voter nodes")
+
+        # C2 Check 10: duplicate report, exact retry preserves created_at
+        res_r1 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-5",
+            vehicle_label="Sentinel-R5",
+            feedback_type="report_incorrect",
+            timestamp=54321.09
+        )
+        assert res_r1 is not None
+        assert res_r1["feedbackCreated"] is True
+
+        res_r2 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-5",
+            vehicle_label="Sentinel-R5",
+            feedback_type="report_incorrect",
+            timestamp=88888.88
+        )
+        assert res_r2 is not None
+        assert res_r2["feedbackCreated"] is False
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-5', scenario_id: $scenario_id})-[r:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN r.created_at as created_at, count(r) as r_count",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["r_count"] == 1, f"Expected 1 REPORTED_INCORRECT relationship, got {rec['r_count']}"
+            assert rec["created_at"] == 54321.09, f"Expected created_at to be preserved at 54321.09, got {rec['created_at']}"
+            assert isinstance(rec["created_at"], float) and not isinstance(rec["created_at"], bool) and math.isfinite(rec["created_at"]) and rec["created_at"] > 0
+        print("PASS: Duplicate report creates one relationship and retry preserves created_at")
+
+        # C2 Check 11: Real AuraDB concurrency check on resolved hazard
+        runner_concur = LocalWorkflowRunner(graph_service=graph_service, ego_location={"latitude": 12.9500, "longitude": 80.1500})
+        obs_concur = {
+            "id": "obs-concur-verify",
+            "type": "pothole",
+            "label": "Pothole Concur",
+            "location": {"latitude": 12.9500, "longitude": 80.1500},
+            "sourceVehicleId": "v-1",
+            "vehicleLabel": "Sentinel-A8",
+        }
+        res_concur = await runner_concur.process_observation(obs_concur)
+        hz_concur_id = res_concur["id"]
+
+        # Resolve the hazard first by submitting 5 incorrect reports from v-1 to v-5
+        for voter in ("v-1", "v-2", "v-3", "v-4", "v-5"):
+            await graph_service.record_hazard_feedback(hz_concur_id, voter, "Voter", "report_incorrect")
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) RETURN h.status as status",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res.single())["status"] == "resolved"
+
+        # Concurrently submit: confirmation from v-concur-c and incorrect report from v-concur-r
+        await asyncio.gather(
+            graph_service.record_hazard_feedback(hz_concur_id, "v-concur-c", "Sentinel-C", "confirm"),
+            graph_service.record_hazard_feedback(hz_concur_id, "v-concur-r", "Sentinel-R", "report_incorrect")
+        )
+
+        async with driver.session(database=db_name) as session:
+            # Verify both relationships exist exactly once
+            res_c = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-concur-c', scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as count",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_c.single())["count"] == 1
+
+            res_r = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-concur-r', scenario_id: $scenario_id})-[r:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN count(r) as count",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            assert (await res_r.single())["count"] == 1
+
+            # Verify final counters are exact, status remains resolved, and no stale aggregate properties remain
+            res_hz = await session.run(
+                "MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN h.status as status, h.confirmed as confirmed, h.reportedIncorrect as reportedIncorrect, h.confidence as confidence",
+                h_id=hz_concur_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec_hz = await res_hz.single()
+            assert rec_hz is not None
+            assert rec_hz["status"] == "resolved"
+            assert rec_hz["confirmed"] == 1
+            assert rec_hz["reportedIncorrect"] == 6
+            assert rec_hz["confidence"] == 0
+        print("PASS: Real AuraDB concurrency check: concurrent confirm and report on resolved hazard leaves it resolved with exact counters")
+
         # 13. Print final successful counts
         async with driver.session(database=db_name) as session:
             res_h = await session.run("MATCH (h:SentinelPerception:Hazard {scenario_id: $scenario_id}) RETURN count(h) as count", scenario_id=SCENARIO_ID)
@@ -351,7 +732,9 @@ async def run_verification():
         print("ALL STAGE B2B INTEGRITY VERIFICATIONS PASSED.")
 
     except Exception as e:
-        print(f"FAIL: Verification failed: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
+        print(f"FAIL: Verification failed: {type(e).__name__}: {e}")
         sys.exit(1)
     finally:
         try:
