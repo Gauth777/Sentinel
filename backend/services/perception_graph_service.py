@@ -463,128 +463,173 @@ class _InMemoryGraphBackend:
         feedback_type: str,
         timestamp: Optional[float] = None,
     ) -> Optional[dict]:
+        import copy
         import math
         async with self._lock:
-            hz_node = self._nodes.get(hazard_id)
-            if not hz_node or hz_node.get("scenarioId") != SCENARIO_ID:
-                return None
-            if hz_node.get("type") != "Hazard":
-                raise ValueError(f"Node {hazard_id} exists but is not a Hazard")
+            # Take deep copy snapshots of nodes and edges to prevent partial mutations from leaking
+            nodes_snapshot = copy.deepcopy(self._nodes)
+            edges_snapshot = copy.deepcopy(self._edges)
+            try:
+                # 1. Validate Hazard before mutation
+                hz_node = self._nodes.get(hazard_id)
+                if not hz_node or hz_node.get("scenarioId") != SCENARIO_ID:
+                    return None
+                if hz_node.get("type") != "Hazard":
+                    raise ValueError(f"Node {hazard_id} exists but is not a Hazard")
 
-            veh_node = self._nodes.get(vehicle_id)
-            if veh_node:
-                if veh_node.get("type") != "Vehicle" or veh_node.get("scenarioId") != SCENARIO_ID:
-                    raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
-            else:
-                self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label, {})
+                # 2. Validate existing voting Vehicle before mutation
+                veh_node = self._nodes.get(vehicle_id)
+                if veh_node:
+                    if veh_node.get("type") != "Vehicle" or veh_node.get("scenarioId") != SCENARIO_ID:
+                        raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
 
-            edge_type = "CONFIRMED" if feedback_type == "confirm" else "REPORTED_INCORRECT"
-            edge_id = f"{edge_type}:{vehicle_id}:{hazard_id}"
+                # 3. Determine edge type and deterministic ID
+                edge_type = "CONFIRMED" if feedback_type == "confirm" else "REPORTED_INCORRECT"
+                edge_id = f"{edge_type}:{vehicle_id}:{hazard_id}"
+                det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
 
-            feedback_created = False
-            det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
+                # 4. Inspect and validate ALL existing feedback relationships in the memory graph
+                semantic_matches = []
+                for eid, e in self._edges.items():
+                    if e["type"] in ("CONFIRMED", "REPORTED_INCORRECT"):
+                        if e.get("scenarioId") != SCENARIO_ID or e.get("properties", {}).get("scenario_id") != SCENARIO_ID:
+                            raise ValueError("Encountered feedback relationship with incorrect scenario ID")
+                    if e["type"] == edge_type and e["source"] == vehicle_id and e["target"] == hazard_id:
+                        semantic_matches.append((eid, e))
 
-            # Locate all relationships of type edge_type from voter to Hazard
-            matching_rels = []
-            for eid, e in self._edges.items():
-                if e["type"] == edge_type and e["source"] == vehicle_id and e["target"] == hazard_id:
-                    matching_rels.append(e)
+                # 5. Check if deterministic edge_id is occupied
+                is_occupied = (edge_id in self._edges)
+                if is_occupied:
+                    occupied_edge = self._edges[edge_id]
+                    o_props = occupied_edge.get("properties", {})
+                    o_c_at = o_props.get("created_at")
+                    is_valid_c_at = (
+                        not isinstance(o_c_at, bool)
+                        and isinstance(o_c_at, (int, float))
+                        and math.isfinite(o_c_at)
+                        and o_c_at >= 0.0
+                    )
+                    if (
+                        occupied_edge["type"] != edge_type
+                        or occupied_edge["source"] != vehicle_id
+                        or occupied_edge["target"] != hazard_id
+                        or occupied_edge.get("scenarioId") != SCENARIO_ID
+                        or o_props.get("scenario_id") != SCENARIO_ID
+                        or o_props.get("feedback_id") != det_feedback_id
+                        or not is_valid_c_at
+                    ):
+                        raise ValueError(f"Deterministic edge ID {edge_id} is occupied by a conflicting or malformed relationship")
 
-            if len(matching_rels) == 0:
-                self._merge_edge_sync(
-                    edge_id,
-                    edge_type,
-                    vehicle_id,
-                    hazard_id,
-                    {
-                        "scenario_id": SCENARIO_ID,
-                        "feedback_id": det_feedback_id,
-                        "created_at": timestamp,
-                    }
-                )
-                feedback_created = True
-            elif len(matching_rels) == 1:
-                rel = matching_rels[0]
-                props = rel.get("properties", {})
-                c_at = props.get("created_at")
+                # 6. Validate duplicate/malformed semantic relationships
+                if len(semantic_matches) > 1:
+                    raise ValueError(f"Multiple relationships of type {edge_type} found between {vehicle_id} and {hazard_id}")
+                elif len(semantic_matches) == 1:
+                    eid, rel = semantic_matches[0]
+                    props = rel.get("properties", {})
+                    c_at = props.get("created_at")
+                    is_valid_c_at = (
+                        not isinstance(c_at, bool)
+                        and isinstance(c_at, (int, float))
+                        and math.isfinite(c_at)
+                        and c_at >= 0.0
+                    )
+                    if (
+                        rel["type"] != edge_type
+                        or rel["source"] != vehicle_id
+                        or rel["target"] != hazard_id
+                        or rel.get("scenarioId") != SCENARIO_ID
+                        or props.get("scenario_id") != SCENARIO_ID
+                        or props.get("feedback_id") != det_feedback_id
+                        or not is_valid_c_at
+                    ):
+                        raise ValueError("Existing feedback relationship is malformed or conflicting")
+                    
+                    feedback_created = False
+                else:
+                    feedback_created = True
 
-                is_valid_created_at = (
-                    not isinstance(c_at, bool)
-                    and isinstance(c_at, (int, float))
-                    and math.isfinite(c_at)
-                    and c_at >= 0.0
-                )
+                # 7. Perform mutations
+                if not veh_node:
+                    self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label or vehicle_id, {})
 
-                if (
-                    props.get("scenario_id") != SCENARIO_ID
-                    or props.get("feedback_id") != det_feedback_id
-                    or not is_valid_created_at
-                    or rel["source"] != vehicle_id
-                    or rel["target"] != hazard_id
-                    or rel["type"] != edge_type
-                ):
-                    raise ValueError("Existing feedback relationship is malformed or conflicting")
-            else:
-                raise ValueError(f"Multiple relationships of type {edge_type} found between {vehicle_id} and {hazard_id}")
+                if feedback_created:
+                    self._merge_edge_sync(
+                        edge_id,
+                        edge_type,
+                        vehicle_id,
+                        hazard_id,
+                        {
+                            "scenario_id": SCENARIO_ID,
+                            "feedback_id": det_feedback_id,
+                            "created_at": timestamp,
+                        }
+                    )
 
-            source_vehicles: Set[str] = set()
-            for e in self._edges.values():
-                if e["type"] != "SUPPORTS" or e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
-                    continue
-                obs_id = e["source"]
-                obs_node = self._nodes.get(obs_id)
-                if not obs_node or obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
-                    continue
-                for e2 in self._edges.values():
-                    if e2["type"] != "OBSERVED" or e2["target"] != obs_id or e2.get("scenarioId") != SCENARIO_ID:
+                # Update hazard statistics
+                source_vehicles: Set[str] = set()
+                for e in self._edges.values():
+                    if e["type"] != "SUPPORTS" or e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
                         continue
-                    v_id = e2["source"]
-                    v_node = self._nodes.get(v_id)
-                    if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                    obs_id = e["source"]
+                    obs_node = self._nodes.get(obs_id)
+                    if not obs_node or obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
                         continue
-                    source_vehicles.add(v_id)
+                    for e2 in self._edges.values():
+                        if e2["type"] != "OBSERVED" or e2["target"] != obs_id or e2.get("scenarioId") != SCENARIO_ID:
+                            continue
+                        v_id = e2["source"]
+                        v_node = self._nodes.get(v_id)
+                        if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                            continue
+                        source_vehicles.add(v_id)
 
-            source_count = len(source_vehicles)
+                source_count = len(source_vehicles)
 
-            confirmed_voters = set()
-            reported_incorrect_voters = set()
-            for e in self._edges.values():
-                if e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
-                    continue
-                if e["type"] == "CONFIRMED":
-                    confirmed_voters.add(e["source"])
-                elif e["type"] == "REPORTED_INCORRECT":
-                    reported_incorrect_voters.add(e["source"])
+                confirmed_voters = set()
+                reported_incorrect_voters = set()
+                for e in self._edges.values():
+                    if e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
+                        continue
+                    if e["type"] == "CONFIRMED":
+                        confirmed_voters.add(e["source"])
+                    elif e["type"] == "REPORTED_INCORRECT":
+                        reported_incorrect_voters.add(e["source"])
 
-            confirmed_count = len(confirmed_voters)
-            reported_incorrect_count = len(reported_incorrect_voters)
+                confirmed_count = len(confirmed_voters)
+                reported_incorrect_count = len(reported_incorrect_voters)
 
-            props = hz_node["properties"]
-            existing_status = props.get("status", "active")
+                props = hz_node["properties"]
+                existing_status = props.get("status", "active")
 
-            confidence, status = _calculate_confidence_and_status(
-                source_count=source_count,
-                confirmed=confirmed_count,
-                reported_incorrect=reported_incorrect_count,
-                existing_status=existing_status,
-            )
+                confidence, status = _calculate_confidence_and_status(
+                    source_count=source_count,
+                    confirmed=confirmed_count,
+                    reported_incorrect=reported_incorrect_count,
+                    existing_status=existing_status,
+                )
 
-            props["sourceCount"] = source_count
-            props["confirmed"] = confirmed_count
-            props["reportedIncorrect"] = reported_incorrect_count
-            props["confidence"] = confidence
-            props["status"] = status
-            if feedback_created:
-                props["feedbackUpdatedAt"] = timestamp
+                props["sourceCount"] = source_count
+                props["confirmed"] = confirmed_count
+                props["reportedIncorrect"] = reported_incorrect_count
+                props["confidence"] = confidence
+                props["status"] = status
+                if feedback_created:
+                    props["feedbackUpdatedAt"] = timestamp
 
-            return {
-                "id": hazard_id,
-                "confirmed": confirmed_count,
-                "reportedIncorrect": reported_incorrect_count,
-                "confidence": confidence,
-                "status": status,
-                "feedbackCreated": feedback_created
-            }
+                return {
+                    "id": hazard_id,
+                    "confirmed": confirmed_count,
+                    "reportedIncorrect": reported_incorrect_count,
+                    "confidence": confidence,
+                    "status": status,
+                    "feedbackCreated": feedback_created
+                }
+
+            except Exception:
+                # Rollback snaps completely to leave memory state byte-for-byte unmodified
+                self._nodes = nodes_snapshot
+                self._edges = edges_snapshot
+                raise
 
     async def upsert_vehicle_approach(
 

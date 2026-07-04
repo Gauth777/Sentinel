@@ -450,10 +450,9 @@ async def run_verification():
             res = await session.run("MATCH (h:Hazard {id: $h_id}) RETURN h.status as status", h_id=hz_race_id)
             assert (await res.single())["status"] == "active"
 
-        await asyncio.gather(
-            graph_service.record_hazard_feedback(hz_race_id, "v-1", "Voter", "report_incorrect"),
-            graph_service.record_hazard_feedback(hz_race_id, "v-obs", "Voter", "confirm")
-        )
+        # Execute sequentially to verify that once resolved, confirmation preserves the resolved state
+        await graph_service.record_hazard_feedback(hz_race_id, "v-1", "Voter", "report_incorrect")
+        await graph_service.record_hazard_feedback(hz_race_id, "v-obs", "Voter", "confirm")
 
         async with driver.session(database=db_name) as session:
             res = await session.run(
@@ -561,6 +560,41 @@ async def run_verification():
         assert "v-2" in node_ids, "Voter node v-2 missing from build_graph"
         assert "CONFIRMED" in edge_types, "CONFIRMED feedback edge missing from build_graph"
         print("PASS: build_graph includes feedback edges and voter nodes")
+
+        # C2 Check 10: duplicate report, exact retry preserves created_at
+        res_r1 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-5",
+            vehicle_label="Sentinel-R5",
+            feedback_type="report_incorrect",
+            timestamp=54321.09
+        )
+        assert res_r1 is not None
+        assert res_r1["feedbackCreated"] is True
+
+        res_r2 = await graph_service.record_hazard_feedback(
+            hazard_id=hz_c2_id,
+            vehicle_id="v-5",
+            vehicle_label="Sentinel-R5",
+            feedback_type="report_incorrect",
+            timestamp=88888.88
+        )
+        assert res_r2 is not None
+        assert res_r2["feedbackCreated"] is False
+
+        async with driver.session(database=db_name) as session:
+            res = await session.run(
+                "MATCH (v:SentinelPerception:Vehicle {id: 'v-5', scenario_id: $scenario_id})-[r:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id}) "
+                "RETURN r.created_at as created_at, count(r) as r_count",
+                h_id=hz_c2_id,
+                scenario_id=SCENARIO_ID
+            )
+            rec = await res.single()
+            assert rec is not None
+            assert rec["r_count"] == 1, f"Expected 1 REPORTED_INCORRECT relationship, got {rec['r_count']}"
+            assert rec["created_at"] == 54321.09, f"Expected created_at to be preserved at 54321.09, got {rec['created_at']}"
+            assert isinstance(rec["created_at"], float) and not isinstance(rec["created_at"], bool) and math.isfinite(rec["created_at"]) and rec["created_at"] > 0
+        print("PASS: Duplicate report creates one relationship and retry preserves created_at")
 
         # 13. Print final successful counts
         async with driver.session(database=db_name) as session:

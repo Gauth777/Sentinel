@@ -920,3 +920,267 @@ async def test_relationship_constraints_creation():
 
     assert any("sentinel_confirmed_feedback_identity" in r and "CONFIRMED" in r for r in runs)
     assert any("sentinel_reported_feedback_identity" in r and "REPORTED_INCORRECT" in r for r in runs)
+
+
+@pytest.mark.anyio
+async def test_memory_fallback_integrity_harden(memory_service):
+    import copy
+    import math
+
+    # Setup baseline hazard
+    await memory_service.upsert_observation_and_hazard(
+        observation_id="obs-harden-1",
+        vehicle_id="v-obs",
+        vehicle_label="Observer",
+        hazard_id="hz-harden-1",
+        hazard_type="pothole",
+        hazard_label="Pothole",
+        latitude=12.9436,
+        longitude=80.1502,
+        road_segment_id="road-1",
+        road_segment_name="Road 1",
+        timestamp=1000.0
+    )
+
+    # Helpers
+    def voter_exists():
+        return "v-voter" in memory_service._memory._nodes
+
+    def edge_exists(eid):
+        return eid in memory_service._memory._edges
+
+    # Test case 1: malformed relationship failure creates no voter
+    mal_edge_id = "CONFIRMED:v-voter:hz-harden-1"
+    memory_service._memory._edges[mal_edge_id] = {
+        "id": mal_edge_id,
+        "type": "CONFIRMED",
+        "source": "v-voter",
+        "target": "hz-harden-1",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": True
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges[mal_edge_id]
+
+    # Test case 2: duplicate relationship failure creates no voter
+    memory_service._memory._edges["edge-dup-1"] = {
+        "id": "edge-dup-1",
+        "type": "CONFIRMED",
+        "source": "v-voter",
+        "target": "hz-harden-1",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+    memory_service._memory._edges["edge-dup-2"] = {
+        "id": "edge-dup-2",
+        "type": "CONFIRMED",
+        "source": "v-voter",
+        "target": "hz-harden-1",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges["edge-dup-1"]
+    del memory_service._memory._edges["edge-dup-2"]
+
+    # Test case 3: deterministic edge ID occupied by wrong type is rejected
+    det_edge_id = "CONFIRMED:v-voter:hz-harden-1"
+    memory_service._memory._edges[det_edge_id] = {
+        "id": det_edge_id,
+        "type": "SUPPORTS",
+        "source": "v-voter",
+        "target": "hz-harden-1",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges[det_edge_id]
+
+    # Test case 4: deterministic edge ID occupied by wrong source is rejected
+    det_edge_id = "CONFIRMED:v-voter:hz-harden-1"
+    memory_service._memory._edges[det_edge_id] = {
+        "id": det_edge_id,
+        "type": "CONFIRMED",
+        "source": "v-wrong-voter",
+        "target": "hz-harden-1",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges[det_edge_id]
+
+    # Test case 5: deterministic edge ID occupied by wrong target is rejected
+    det_edge_id = "CONFIRMED:v-voter:hz-harden-1"
+    memory_service._memory._edges[det_edge_id] = {
+        "id": det_edge_id,
+        "type": "CONFIRMED",
+        "source": "v-voter",
+        "target": "hz-wrong-hazard",
+        "scenarioId": SCENARIO_ID,
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges[det_edge_id]
+
+    # Test case 6: wrong top-level scenarioId is rejected even when properties.scenario_id is correct
+    det_edge_id = "CONFIRMED:v-voter:hz-harden-1"
+    memory_service._memory._edges[det_edge_id] = {
+        "id": det_edge_id,
+        "type": "CONFIRMED",
+        "source": "v-voter",
+        "target": "hz-harden-1",
+        "scenarioId": "wrong-top-level-scenario",
+        "properties": {
+            "scenario_id": SCENARIO_ID,
+            "feedback_id": f"{SCENARIO_ID}:confirm:hz-harden-1:v-voter",
+            "created_at": 100.0
+        }
+    }
+
+    snapshot_nodes = copy.deepcopy(memory_service._memory._nodes)
+    snapshot_edges = copy.deepcopy(memory_service._memory._edges)
+
+    with pytest.raises(ValueError):
+        await memory_service.record_hazard_feedback(
+            hazard_id="hz-harden-1",
+            vehicle_id="v-voter",
+            vehicle_label="Voter",
+            feedback_type="confirm",
+            timestamp=2000.0
+        )
+
+    assert not voter_exists()
+    assert memory_service._memory._nodes == snapshot_nodes
+    assert memory_service._memory._edges == snapshot_edges
+
+    del memory_service._memory._edges[det_edge_id]
+
+    # Test case 7: valid new feedback still creates exactly one edge
+    res = await memory_service.record_hazard_feedback(
+        hazard_id="hz-harden-1",
+        vehicle_id="v-voter",
+        vehicle_label="Voter",
+        feedback_type="confirm",
+        timestamp=3000.0
+    )
+    assert res["feedbackCreated"] is True
+    assert voter_exists()
+    assert edge_exists("CONFIRMED:v-voter:hz-harden-1")
+
+    # Test case 8: exact retry still preserves created_at and feedbackUpdatedAt
+    res_retry = await memory_service.record_hazard_feedback(
+        hazard_id="hz-harden-1",
+        vehicle_id="v-voter",
+        vehicle_label="Voter",
+        feedback_type="confirm",
+        timestamp=4000.0
+    )
+    assert res_retry["feedbackCreated"] is False
+    edge = memory_service._memory._edges["CONFIRMED:v-voter:hz-harden-1"]
+    assert edge["properties"]["created_at"] == 3000.0
+    hz = memory_service._memory._nodes["hz-harden-1"]
+    assert hz["properties"]["feedbackUpdatedAt"] == 3000.0
