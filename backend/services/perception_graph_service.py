@@ -38,6 +38,36 @@ def _now() -> str:
     )
 
 
+def _calculate_confidence_and_status(
+    source_count: int,
+    confirmed: int,
+    reported_incorrect: int,
+    existing_status: str,
+) -> Tuple[int, str]:
+    if source_count <= 1:
+        base = 60
+    elif source_count == 2:
+        base = 80
+    else:
+        base = 100
+
+    effective = base + confirmed * 10 - reported_incorrect * 15
+    confidence = max(0, min(100, int(effective)))
+
+    # Status becomes resolved when:
+    # - effective confidence <= 0; or
+    # - reported_incorrect >= 5; or
+    # - existing status was already resolved.
+    # Resolved status is monotonic and must never be changed back to active.
+    if confidence <= 0 or reported_incorrect >= 5 or existing_status == "resolved":
+        status = "resolved"
+    else:
+        status = "active"
+
+    return confidence, status
+
+
+
 def _normalize_response(
     mode: str, hazard_id: Optional[str], nodes: Dict[str, Dict], edges: Dict[str, Dict]
 ) -> Dict[str, Any]:
@@ -114,6 +144,13 @@ def _normalize_response(
         elif e["type"] == "APPROACHING":
             ts = 0.0
             desc = f"Vehicle {e['source']} approaching road {e['target']}"
+        elif e["type"] == "CONFIRMED":
+            ts = e.get("properties", {}).get("created_at", 0.0)
+            desc = f"Vehicle {e['source']} confirmed hazard {e['target']}"
+        elif e["type"] == "REPORTED_INCORRECT":
+            ts = e.get("properties", {}).get("created_at", 0.0)
+            desc = f"Vehicle {e['source']} reported hazard {e['target']} as incorrect"
+
         timeline.append(
             {
                 "eventId": e["id"],
@@ -214,15 +251,23 @@ class _InMemoryGraphBackend:
                 source_vehicles.add(v_id)
 
         source_count = len(source_vehicles)
-        if source_count == 1:
-            confidence = 60
-        elif source_count == 2:
-            confidence = 80
-        else:
-            confidence = 100 if source_count >= 3 else 60
 
-        self._nodes[hazard_id]["properties"]["sourceCount"] = source_count
-        self._nodes[hazard_id]["properties"]["confidence"] = confidence
+        props = hz_node.get("properties", {})
+        confirmed = int(props.get("confirmed", 0))
+        reported_incorrect = int(props.get("reportedIncorrect", 0))
+        existing_status = props.get("status", "active")
+
+        confidence, status = _calculate_confidence_and_status(
+            source_count=source_count,
+            confirmed=confirmed,
+            reported_incorrect=reported_incorrect,
+            existing_status=existing_status,
+        )
+
+        props["sourceCount"] = source_count
+        props["confidence"] = confidence
+        props["status"] = status
+
 
     async def record_observation(
         self,
@@ -410,7 +455,114 @@ class _InMemoryGraphBackend:
                     {},
                 )
 
+    async def record_hazard_feedback(
+        self,
+        hazard_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        feedback_type: str,
+        timestamp: Optional[float] = None,
+    ) -> Optional[dict]:
+        ts = timestamp if timestamp is not None else 0.0
+
+        async with self._lock:
+            hz_node = self._nodes.get(hazard_id)
+            if not hz_node or hz_node.get("scenarioId") != SCENARIO_ID:
+                return None
+            if hz_node.get("type") != "Hazard":
+                raise ValueError(f"Node {hazard_id} exists but is not a Hazard")
+
+            veh_node = self._nodes.get(vehicle_id)
+            if veh_node:
+                if veh_node.get("type") != "Vehicle" or veh_node.get("scenarioId") != SCENARIO_ID:
+                    raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle of scenario {SCENARIO_ID}")
+            else:
+                self._merge_node_sync(vehicle_id, "Vehicle", vehicle_label, {})
+
+            edge_type = "CONFIRMED" if feedback_type == "confirm" else "REPORTED_INCORRECT"
+            edge_id = f"{edge_type}:{vehicle_id}:{hazard_id}"
+
+            feedback_created = False
+            existing_edge = self._edges.get(edge_id)
+            det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
+
+            if existing_edge:
+                props = existing_edge.get("properties", {})
+                if props.get("feedback_id") != det_feedback_id or not isinstance(props.get("created_at"), (int, float)):
+                    raise ValueError("Existing relationship is malformed or has conflicting properties")
+            else:
+                self._merge_edge_sync(
+                    edge_id,
+                    edge_type,
+                    vehicle_id,
+                    hazard_id,
+                    {
+                        "scenario_id": SCENARIO_ID,
+                        "feedback_id": det_feedback_id,
+                        "created_at": ts,
+                    }
+                )
+                feedback_created = True
+
+            source_vehicles: Set[str] = set()
+            for e in self._edges.values():
+                if e["type"] != "SUPPORTS" or e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
+                    continue
+                obs_id = e["source"]
+                obs_node = self._nodes.get(obs_id)
+                if not obs_node or obs_node.get("type") != "Observation" or obs_node.get("scenarioId") != SCENARIO_ID:
+                    continue
+                for e2 in self._edges.values():
+                    if e2["type"] != "OBSERVED" or e2["target"] != obs_id or e2.get("scenarioId") != SCENARIO_ID:
+                        continue
+                    v_id = e2["source"]
+                    v_node = self._nodes.get(v_id)
+                    if not v_node or v_node.get("type") != "Vehicle" or v_node.get("scenarioId") != SCENARIO_ID:
+                        continue
+                    source_vehicles.add(v_id)
+
+            source_count = len(source_vehicles)
+
+            confirmed_voters = set()
+            reported_incorrect_voters = set()
+            for e in self._edges.values():
+                if e["target"] != hazard_id or e.get("scenarioId") != SCENARIO_ID:
+                    continue
+                if e["type"] == "CONFIRMED":
+                    confirmed_voters.add(e["source"])
+                elif e["type"] == "REPORTED_INCORRECT":
+                    reported_incorrect_voters.add(e["source"])
+
+            confirmed_count = len(confirmed_voters)
+            reported_incorrect_count = len(reported_incorrect_voters)
+
+            props = hz_node["properties"]
+            existing_status = props.get("status", "active")
+
+            confidence, status = _calculate_confidence_and_status(
+                source_count=source_count,
+                confirmed=confirmed_count,
+                reported_incorrect=reported_incorrect_count,
+                existing_status=existing_status,
+            )
+
+            props["sourceCount"] = source_count
+            props["confirmed"] = confirmed_count
+            props["reportedIncorrect"] = reported_incorrect_count
+            props["confidence"] = confidence
+            props["status"] = status
+
+            return {
+                "id": hazard_id,
+                "confirmed": confirmed_count,
+                "reportedIncorrect": reported_incorrect_count,
+                "confidence": confidence,
+                "status": status,
+                "feedbackCreated": feedback_created
+            }
+
     async def upsert_vehicle_approach(
+
         self,
         vehicle_id: str,
         vehicle_label: str,
@@ -502,8 +654,17 @@ class _InMemoryGraphBackend:
                         if v_id in self._nodes:
                             nodes[v_id] = self._nodes[v_id]
 
+        # Feedback relationships to this hazard
+        for eid, e in self._edges.items():
+            if e["type"] in ("CONFIRMED", "REPORTED_INCORRECT") and e["target"] == hazard_id:
+                edges[eid] = e
+                v_id = e["source"]
+                if v_id in self._nodes:
+                    nodes[v_id] = self._nodes[v_id]
+
         # Road segment from this hazard
         road_segment_ids: Set[str] = set()
+
         for eid, e in self._edges.items():
             if e["type"] == "ON_ROAD" and e["source"] == hazard_id:
                 edges[eid] = e
@@ -649,14 +810,18 @@ class _InMemoryGraphBackend:
 
         confidence = props.get("confidence")
         if confidence is None:
-            if source_count == 1:
-                confidence = 60
-            elif source_count == 2:
-                confidence = 80
-            else:
-                confidence = 100 if source_count >= 3 else 60
+            confirmed = int(props.get("confirmed", 0))
+            reported_incorrect = int(props.get("reportedIncorrect", 0))
+            existing_status = props.get("status", "active")
+            confidence, _ = _calculate_confidence_and_status(
+                source_count=source_count,
+                confirmed=confirmed,
+                reported_incorrect=reported_incorrect,
+                existing_status=existing_status,
+            )
         else:
             confidence = int(confidence)
+
 
         polygon = props.get("polygon", None)
         if polygon is not None:
@@ -1487,9 +1652,11 @@ class _Neo4jGraphBackend:
             OPTIONAL MATCH (h)-[tw:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w:SentinelPerception:Warning)
             OPTIONAL MATCH (w)-[dt:DELIVERED_TO {scenario_id: $scenario_id}]->(rv:SentinelPerception:Vehicle)
             OPTIONAL MATCH (rv)-[app2:APPROACHING {scenario_id: $scenario_id}]->(r)
-            WITH h, obs, v, r, w, rv, sup, obs_rel, onr, app1, tw, dt, app2
-            RETURN [node IN collect(DISTINCT h) + collect(DISTINCT obs) + collect(DISTINCT v) + collect(DISTINCT r) + collect(DISTINCT w) + collect(DISTINCT rv) WHERE node IS NOT NULL] AS nodes,
-                   [rel IN collect(DISTINCT sup) + collect(DISTINCT obs_rel) + collect(DISTINCT onr) + collect(DISTINCT app1) + collect(DISTINCT tw) + collect(DISTINCT dt) + collect(DISTINCT app2) WHERE rel IS NOT NULL] AS edges
+            OPTIONAL MATCH (vv:SentinelPerception:Vehicle)-[conf:CONFIRMED {scenario_id: $scenario_id}]->(h)
+            OPTIONAL MATCH (vv2:SentinelPerception:Vehicle)-[rep:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h)
+            WITH h, obs, v, r, w, rv, vv, vv2, sup, obs_rel, onr, app1, tw, dt, app2, conf, rep
+            RETURN [node IN collect(DISTINCT h) + collect(DISTINCT obs) + collect(DISTINCT v) + collect(DISTINCT r) + collect(DISTINCT w) + collect(DISTINCT rv) + collect(DISTINCT vv) + collect(DISTINCT vv2) WHERE node IS NOT NULL] AS nodes,
+                   [rel IN collect(DISTINCT sup) + collect(DISTINCT obs_rel) + collect(DISTINCT onr) + collect(DISTINCT app1) + collect(DISTINCT tw) + collect(DISTINCT dt) + collect(DISTINCT app2) + collect(DISTINCT conf) + collect(DISTINCT rep) WHERE rel IS NOT NULL] AS edges
             """
             params: Dict[str, Any] = {"h_id": hazard_id, "scenario_id": SCENARIO_ID}
         else:
@@ -1503,9 +1670,11 @@ class _Neo4jGraphBackend:
             OPTIONAL MATCH (h)-[tw:TRIGGERED_WARNING {scenario_id: $scenario_id}]->(w:SentinelPerception:Warning)
             OPTIONAL MATCH (w)-[dt:DELIVERED_TO {scenario_id: $scenario_id}]->(rv:SentinelPerception:Vehicle)
             OPTIONAL MATCH (rv)-[app2:APPROACHING {scenario_id: $scenario_id}]->(r)
-            WITH h, obs, v, r, w, rv, sup, obs_rel, onr, app1, tw, dt, app2
-            RETURN [node IN collect(DISTINCT h) + collect(DISTINCT obs) + collect(DISTINCT v) + collect(DISTINCT r) + collect(DISTINCT w) + collect(DISTINCT rv) WHERE node IS NOT NULL] AS nodes,
-                   [rel IN collect(DISTINCT sup) + collect(DISTINCT obs_rel) + collect(DISTINCT onr) + collect(DISTINCT app1) + collect(DISTINCT tw) + collect(DISTINCT dt) + collect(DISTINCT app2) WHERE rel IS NOT NULL] AS edges
+            OPTIONAL MATCH (vv:SentinelPerception:Vehicle)-[conf:CONFIRMED {scenario_id: $scenario_id}]->(h)
+            OPTIONAL MATCH (vv2:SentinelPerception:Vehicle)-[rep:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h)
+            WITH h, obs, v, r, w, rv, vv, vv2, sup, obs_rel, onr, app1, tw, dt, app2, conf, rep
+            RETURN [node IN collect(DISTINCT h) + collect(DISTINCT obs) + collect(DISTINCT v) + collect(DISTINCT r) + collect(DISTINCT w) + collect(DISTINCT rv) + collect(DISTINCT vv) + collect(DISTINCT vv2) WHERE node IS NOT NULL] AS nodes,
+                   [rel IN collect(DISTINCT sup) + collect(DISTINCT obs_rel) + collect(DISTINCT onr) + collect(DISTINCT app1) + collect(DISTINCT tw) + collect(DISTINCT dt) + collect(DISTINCT app2) + collect(DISTINCT conf) + collect(DISTINCT rep) WHERE rel IS NOT NULL] AS edges
             """
             params = {"scenario_id": SCENARIO_ID, "limit": limit}
 
@@ -1560,14 +1729,19 @@ class _Neo4jGraphBackend:
         eid = f"{rel.type}:{rel.start_node['id']}:{rel.end_node['id']}"
         if eid in edges:
             return
+        props = {}
+        for key in rel.keys():
+            props[key] = rel[key]
+        props.pop("scenario_id", None)
         edges[eid] = {
             "id": eid,
             "type": rel.type,
             "source": rel.start_node["id"],
             "target": rel.end_node["id"],
             "scenarioId": SCENARIO_ID,
-            "properties": {},
+            "properties": props,
         }
+
 
     async def list_hazards(self, limit: int = 100) -> List[dict]:
         if self._driver is None:
@@ -1905,12 +2079,20 @@ class _Neo4jGraphBackend:
             source_vehicles.sort()
             source_count = len(source_vehicles)
 
-            if source_count == 1:
-                confidence = 60
-            elif source_count == 2:
-                confidence = 80
+            confidence = props.get("confidence")
+            if confidence is None:
+                confirmed = int(props.get("confirmed", 0))
+                reported_incorrect = int(props.get("reportedIncorrect", 0))
+                existing_status = props.get("status", "active")
+                confidence, _ = _calculate_confidence_and_status(
+                    source_count=source_count,
+                    confirmed=confirmed,
+                    reported_incorrect=reported_incorrect,
+                    existing_status=existing_status,
+                )
             else:
-                confidence = 100 if source_count >= 3 else 60
+                confidence = int(confidence)
+
 
             polygon = props.get("polygon")
             if isinstance(polygon, str):
@@ -2098,19 +2280,42 @@ class _Neo4jGraphBackend:
             scenario_id=SCENARIO_ID
         )
 
-        stats_query = """
+        # Get current hazard status, confirmed, and reportedIncorrect, and count observation sources
+        read_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
         OPTIONAL MATCH (obs:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
         OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
-        WITH h, count(DISTINCT v) as sourceCount
-        SET h.sourceCount = sourceCount,
-            h.confidence = CASE
-                WHEN sourceCount = 1 THEN 60
-                WHEN sourceCount = 2 THEN 80
-                ELSE 100
-            END
+        RETURN h.status as status, coalesce(h.confirmed, 0) as confirmed, coalesce(h.reportedIncorrect, 0) as reportedIncorrect, count(DISTINCT v.id) as sourceCount
         """
-        await tx.run(stats_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        res_stats = await tx.run(read_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        stats_rec = await res_stats.single()
+        if stats_rec:
+            source_count = stats_rec["sourceCount"]
+            confirmed = int(stats_rec["confirmed"])
+            reported_incorrect = int(stats_rec["reportedIncorrect"])
+            existing_status = stats_rec["status"] or "active"
+
+            confidence, status = _calculate_confidence_and_status(
+                source_count=source_count,
+                confirmed=confirmed,
+                reported_incorrect=reported_incorrect,
+                existing_status=existing_status,
+            )
+
+            update_query = """
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            SET h.sourceCount = $sourceCount,
+                h.confidence = $confidence,
+                h.status = $status
+            """
+            await tx.run(
+                update_query,
+                h_id=hazard_id,
+                sourceCount=source_count,
+                confidence=confidence,
+                status=status,
+                scenario_id=SCENARIO_ID,
+            )
 
         norm_query = """
         MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
@@ -2136,12 +2341,20 @@ class _Neo4jGraphBackend:
         source_vehicles.sort()
         source_count = len(source_vehicles)
 
-        if source_count == 1:
-            confidence = 60
-        elif source_count == 2:
-            confidence = 80
+        confidence = props.get("confidence")
+        if confidence is None:
+            confirmed = int(props.get("confirmed", 0))
+            reported_incorrect = int(props.get("reportedIncorrect", 0))
+            existing_status = props.get("status", "active")
+            confidence, _ = _calculate_confidence_and_status(
+                source_count=source_count,
+                confirmed=confirmed,
+                reported_incorrect=reported_incorrect,
+                existing_status=existing_status,
+            )
         else:
-            confidence = 100 if source_count >= 3 else 60
+            confidence = int(confidence)
+
 
         polygon = props.get("polygon")
         if isinstance(polygon, str):
@@ -2195,7 +2408,239 @@ class _Neo4jGraphBackend:
             "observationCreated": observation_created,
         }
 
+    async def record_hazard_feedback(
+        self,
+        hazard_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        feedback_type: str,
+        timestamp: Optional[float] = None,
+    ) -> Optional[dict]:
+        if self._driver is None:
+            raise RuntimeError("Neo4j driver not initialized")
+
+        async with self._driver.session(database=self._database) as session:
+            return await session.execute_write(
+                self._record_hazard_feedback_tx,
+                hazard_id=hazard_id,
+                vehicle_id=vehicle_id,
+                vehicle_label=vehicle_label,
+                feedback_type=feedback_type,
+                timestamp=timestamp,
+            )
+
+    async def _record_hazard_feedback_tx(
+        self,
+        tx,
+        hazard_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        feedback_type: str,
+        timestamp: Optional[float] = None,
+    ) -> Optional[dict]:
+        ts = timestamp if timestamp is not None else 0.0
+
+        # 1. Inspect scenario-scoped nodes with the hazard ID
+        hz_check = """
+        MATCH (n {id: $h_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id, n.status as status
+        """
+        res_hz = await tx.run(hz_check, h_id=hazard_id)
+        hz_nodes = await res_hz.data()
+
+        sentinel_hz = [
+            n for n in hz_nodes
+            if n.get("labels") is not None and "SentinelPerception" in n["labels"] and n["scenario_id"] == SCENARIO_ID
+        ]
+
+        # 2. Return None only when no such SentinelPerception node exists
+        if not sentinel_hz:
+            return None
+
+        # 3. Reject wrong-type or ambiguous Hazard state
+        if len(sentinel_hz) > 1:
+            raise ValueError(f"Ambiguous state: multiple SentinelPerception nodes found for ID {hazard_id}")
+        hz_info = sentinel_hz[0]
+        if "Hazard" not in hz_info["labels"]:
+            raise ValueError(f"Node {hazard_id} exists but is not a Hazard")
+
+        # 4. Acquire a write lock on the Hazard before checking/creating feedback
+        lock_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        SET h.feedbackRevision = coalesce(h.feedbackRevision, 0) + 1
+        RETURN h.feedbackRevision as revision
+        """
+        await tx.run(lock_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+
+        # 5. Validate or create the voting Vehicle
+        v_check = """
+        MATCH (n {id: $v_id})
+        RETURN labels(n) as labels, n.scenario_id as scenario_id
+        """
+        res_v = await tx.run(v_check, v_id=vehicle_id)
+        v_nodes = await res_v.data()
+
+        sentinel_v = [
+            n for n in v_nodes
+            if n.get("labels") is not None and "SentinelPerception" in n["labels"] and n["scenario_id"] == SCENARIO_ID
+        ]
+
+        if sentinel_v:
+            if len(sentinel_v) > 1:
+                raise ValueError(f"Ambiguous state: multiple SentinelPerception nodes found for vehicle ID {vehicle_id}")
+            v_info = sentinel_v[0]
+            if "Vehicle" not in v_info["labels"]:
+                raise ValueError(f"Node {vehicle_id} exists but is not a Vehicle")
+        else:
+            create_v_query = """
+            CREATE (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+            SET v.label = $v_label
+            """
+            await tx.run(create_v_query, v_id=vehicle_id, v_label=vehicle_label, scenario_id=SCENARIO_ID)
+
+        # 6. Check existing feedback relationship integrity
+        rel_label = "CONFIRMED" if feedback_type == "confirm" else "REPORTED_INCORRECT"
+        det_feedback_id = f"{SCENARIO_ID}:{feedback_type}:{hazard_id}:{vehicle_id}"
+
+        rel_check = f"""
+        MATCH (v:SentinelPerception:Vehicle {{id: $v_id, scenario_id: $scenario_id}})
+        MATCH (h:SentinelPerception:Hazard {{id: $h_id, scenario_id: $scenario_id}})
+        MATCH (v)-[r:{rel_label}]->(h)
+        RETURN r.feedback_id as feedback_id, r.created_at as created_at, r.scenario_id as scenario_id
+        """
+        res_rel = await tx.run(rel_check, v_id=vehicle_id, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        rels = await res_rel.data()
+
+        feedback_created = False
+        if rels:
+            if len(rels) != 1:
+                raise ValueError(f"Multiple relationships of type {rel_label} found between {vehicle_id} and {hazard_id}")
+            r_info = rels[0]
+            if r_info["feedback_id"] != det_feedback_id or r_info["scenario_id"] != SCENARIO_ID or not isinstance(r_info["created_at"], (int, float)):
+                raise ValueError("Existing feedback relationship is malformed or conflicting")
+        else:
+            # 7. Create the relationship only when absent
+            if feedback_type == "confirm":
+                create_rel_query = """
+                MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+                MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+                CREATE (v)-[r:CONFIRMED {
+                    scenario_id: $scenario_id,
+                    feedback_id: $feedback_id,
+                    created_at: $created_at
+                }]->(h)
+                """
+            else:
+                create_rel_query = """
+                MATCH (v:SentinelPerception:Vehicle {id: $v_id, scenario_id: $scenario_id})
+                MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+                CREATE (v)-[r:REPORTED_INCORRECT {
+                    scenario_id: $scenario_id,
+                    feedback_id: $feedback_id,
+                    created_at: $created_at
+                }]->(h)
+                """
+            await tx.run(
+                create_rel_query,
+                v_id=vehicle_id,
+                h_id=hazard_id,
+                scenario_id=SCENARIO_ID,
+                feedback_id=det_feedback_id,
+                created_at=ts,
+            )
+            feedback_created = True
+
+        # 8. Count distinct observation source vehicles
+        obs_sources_query = """
+        MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        OPTIONAL MATCH (obs:SentinelPerception:Observation {scenario_id: $scenario_id})-[:SUPPORTS {scenario_id: $scenario_id}]->(h)
+        OPTIONAL MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[:OBSERVED {scenario_id: $scenario_id}]->(obs)
+        RETURN count(DISTINCT v.id) as sourceCount
+        """
+        res_sources = await tx.run(obs_sources_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        rec_sources = await res_sources.single()
+        source_count = rec_sources["sourceCount"] if rec_sources else 0
+
+        # 9. Count distinct CONFIRMED voters
+        confirmed_query = """
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[r:CONFIRMED {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN count(DISTINCT v.id) as confirmedCount
+        """
+        res_confirmed = await tx.run(confirmed_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        rec_confirmed = await res_confirmed.single()
+        confirmed_count = rec_confirmed["confirmedCount"] if rec_confirmed else 0
+
+        # 10. Count distinct REPORTED_INCORRECT voters
+        reported_query = """
+        MATCH (v:SentinelPerception:Vehicle {scenario_id: $scenario_id})-[r:REPORTED_INCORRECT {scenario_id: $scenario_id}]->(h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+        RETURN count(DISTINCT v.id) as reportedCount
+        """
+        res_reported = await tx.run(reported_query, h_id=hazard_id, scenario_id=SCENARIO_ID)
+        rec_reported = await res_reported.single()
+        reported_incorrect_count = rec_reported["reportedCount"] if rec_reported else 0
+
+        # 11. Apply the shared confidence/status rule
+        existing_status = hz_info["status"] or "active"
+        confidence, status = _calculate_confidence_and_status(
+            source_count=source_count,
+            confirmed=confirmed_count,
+            reported_incorrect=reported_incorrect_count,
+            existing_status=existing_status,
+        )
+
+        # 12. Update hazard
+        if feedback_created:
+            update_query = """
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            SET h.sourceCount = $sourceCount,
+                h.confirmed = $confirmed,
+                h.reportedIncorrect = $reportedIncorrect,
+                h.confidence = $confidence,
+                h.status = $status,
+                h.feedbackUpdatedAt = $feedback_timestamp
+            """
+            await tx.run(
+                update_query,
+                h_id=hazard_id,
+                sourceCount=source_count,
+                confirmed=confirmed_count,
+                reportedIncorrect=reported_incorrect_count,
+                confidence=confidence,
+                status=status,
+                feedback_timestamp=ts,
+                scenario_id=SCENARIO_ID,
+            )
+        else:
+            update_query = """
+            MATCH (h:SentinelPerception:Hazard {id: $h_id, scenario_id: $scenario_id})
+            SET h.sourceCount = $sourceCount,
+                h.confirmed = $confirmed,
+                h.reportedIncorrect = $reportedIncorrect,
+                h.confidence = $confidence,
+                h.status = $status
+            """
+            await tx.run(
+                update_query,
+                h_id=hazard_id,
+                sourceCount=source_count,
+                confirmed=confirmed_count,
+                reportedIncorrect=reported_incorrect_count,
+                confidence=confidence,
+                status=status,
+                scenario_id=SCENARIO_ID,
+            )
+
+        return {
+            "id": hazard_id,
+            "confirmed": confirmed_count,
+            "reportedIncorrect": reported_incorrect_count,
+            "confidence": confidence,
+            "status": status,
+            "feedbackCreated": feedback_created
+        }
+
     async def upsert_observation_and_hazard(
+
         self,
         *,
         observation_id: str,
@@ -2418,9 +2863,10 @@ class PerceptionGraphService:
                 return await neo4j_method(*args, **kwargs)
             except ValueError:
                 raise
-            except Exception:
+            except Exception as e:
                 self._neo4j_connected = False
-                raise RuntimeError("Neo4j operation failed in strict mode") from None
+                logger.error(f"Neo4j operation failed in strict mode: {e}", exc_info=True)
+                raise RuntimeError(f"Neo4j operation failed in strict mode: {e}") from e
         else:
             if self._mode == "neo4j":
                 try:
@@ -2429,7 +2875,7 @@ class PerceptionGraphService:
                     raise
                 except Exception as e:
                     logger.warning(
-                        f"Neo4j operation failed ({type(e).__name__}), falling back to memory"
+                        f"Neo4j operation failed ({type(e).__name__}): {e}, falling back to memory"
                     )
                     self._neo4j_connected = False
                     await self._memory.initialize()
@@ -2521,7 +2967,55 @@ class PerceptionGraphService:
                 timestamp=timestamp,
             )
 
+    async def record_hazard_feedback(
+        self,
+        hazard_id: str,
+        vehicle_id: str,
+        vehicle_label: str,
+        feedback_type: str,
+        timestamp: Optional[float] = None,
+    ) -> Optional[dict]:
+        import math
+        # 1. Validation
+        if not hazard_id or not isinstance(hazard_id, str) or not hazard_id.strip():
+            raise ValueError("hazard_id must be a non-empty string")
+        if not vehicle_id or not isinstance(vehicle_id, str) or not vehicle_id.strip():
+            raise ValueError("vehicle_id must be a non-empty string")
+        if not vehicle_label or not isinstance(vehicle_label, str) or not vehicle_label.strip():
+            raise ValueError("vehicle_label must be a non-empty string")
+        if feedback_type not in ("confirm", "report_incorrect"):
+            raise ValueError("feedback_type must be exactly 'confirm' or 'report_incorrect'")
+        if timestamp is not None:
+            if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or timestamp < 0.0:
+                raise ValueError("timestamp must be None or a finite non-boolean number >= 0")
+
+        # 2. Call backend
+        if self._mode == "neo4j":
+            try:
+                return await self._neo4j.record_hazard_feedback(
+                    hazard_id=hazard_id,
+                    vehicle_id=vehicle_id,
+                    vehicle_label=vehicle_label,
+                    feedback_type=feedback_type,
+                    timestamp=timestamp,
+                )
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.error(f"Neo4j feedback write failed: {e}", exc_info=True)
+                raise RuntimeError(f"Neo4j feedback write failed: {e}") from e
+
+        else:
+            return await self._memory.record_hazard_feedback(
+                hazard_id=hazard_id,
+                vehicle_id=vehicle_id,
+                vehicle_label=vehicle_label,
+                feedback_type=feedback_type,
+                timestamp=timestamp,
+            )
+
     async def get_observation_hazard(
+
         self,
         observation_id: str,
     ) -> Optional[dict]:

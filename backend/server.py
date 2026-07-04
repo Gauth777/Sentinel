@@ -406,45 +406,34 @@ ROAD_CORRIDOR = (
 # Bump SEED_VERSION when the demo data shape changes. ensure_seed() upserts each
 # known demo document by `id`, replacing old-schema records in-place. It does NOT
 # touch unrelated collections or user-generated records.
-SEED_VERSION = 3
-DEPRECATED_SEED_HAZARD_IDS = ("hz-001",)
+SEED_VERSION = 4
 
 
 async def ensure_seed() -> None:
-    """Idempotent demo-data migration for Mongo compatibility and nearby vehicles.
+    """Idempotent demo-data migration for nearby vehicles.
 
-    - Tracks the applied seed version in db.sentinel_meta (single doc, id='seed').
-    - When the persisted version differs from SEED_VERSION (or is missing) the
-      known demo documents (hz-*, v-*) are upserted by `id`, replacing any
-      legacy-shape records left over from earlier app versions.
-    - Repeated startup with the same SEED_VERSION is a no-op fast path.
-    - Confirmed/reportedIncorrect counters are preserved across migrations.
-    - Does NOT seed the perception graph. Graph seeding is done separately in
-      lifespan startup and demo_reset.
+    Tracks the applied seed version in db.sentinel_meta (single doc, id='seed').
+    When the version is outdated:
+    - performs one-time deletion of obsolete Mongo hazard/observation and old graph fallback collections.
+    - migrates nearby vehicles.
+
     """
     meta = await db.sentinel_meta.find_one({"id": "seed"})
     if meta and meta.get("version") == SEED_VERSION:
         return  # already migrated to the current shape
-    # Remove demo hazards retired from the baseline scenario.
-    for hazard_id in DEPRECATED_SEED_HAZARD_IDS:
-        await db.hazards.delete_many({"id": hazard_id})
-        await db.observations.delete_many({"hazard_id": hazard_id})
 
-    from services.warning_service import WarningService
-    # Migrate hazards: upsert each known demo hazard, keep counters if present.
-    for hz in SEED_HAZARDS:
-        existing = await db.hazards.find_one({"id": hz["id"]}, {"_id": 0}) or {}
-        merged = dict(hz)
-        # Preserve counters from prior records when present.
-        merged["confirmed"] = int(existing.get("confirmed", hz.get("confirmed", 0)) or 0)
-        merged["reportedIncorrect"] = int(existing.get("reportedIncorrect", hz.get("reportedIncorrect", 0)) or 0)
-        merged["status"] = "active"
-        merged["warnings"] = WarningService.generate_warning_texts(
-            hz["type"],
-            int(hz["distanceMeters"]),
-            hz["recommendedAction"]
-        )
-        await db.hazards.replace_one({"id": hz["id"]}, merged, upsert=True)
+    # One-time cleanup deletion of legacy/fallback collections:
+    obsolete_collections = [
+        "hazards",
+        "observations",
+    ] + [f"neo4j_{c}" for c in [
+        "confirmations", "reports", "hazards", "observations",
+        "warnings", "vehicles", "road_segments", "approaching"
+    ]]
+
+    for coll_name in obsolete_collections:
+        await getattr(db, coll_name).delete_many({})
+
 
     # Migrate nearby vehicles.
     for v in SEED_VEHICLES:
@@ -456,6 +445,7 @@ async def ensure_seed() -> None:
         {"id": "seed", "version": SEED_VERSION},
         upsert=True,
     )
+
 
 
 async def _seed_demo_graph_vehicles() -> None:
@@ -742,33 +732,23 @@ async def get_world_model(
 
 @api_router.post("/sentinel/hazards/{hazard_id}/confirm", response_model=HazardActionResponse)
 async def confirm_hazard(hazard_id: str):
-    from services.neo4j_service import Neo4jService
-    vehicle_id = "v-ego"
-    await Neo4jService.record_confirmation(vehicle_id, hazard_id)
-    votes = await Neo4jService.get_community_votes(hazard_id)
-    res = await db.hazards.find_one_and_update(
-        {"id": hazard_id},
-        {"$set": {"confirmed": votes["confirmed"], "reportedIncorrect": votes["reportedIncorrect"]}},
-        projection={"_id": 0},
-        return_document=True,
-    )
-    if res:
-        sources_count = res.get("sources", 1)
-        base_confidence = 60 + min(40, (sources_count - 1) * 20)
-        confirmed = res.get("confirmed", 0)
-        reported_incorrect = res.get("reportedIncorrect", 0)
-        confidence = max(0, min(100, int(base_confidence + confirmed * 10 - reported_incorrect * 15)))
-        status = "active"
-        if confidence <= 0 or reported_incorrect >= 5:
-            status = "resolved"
-        res = await db.hazards.find_one_and_update(
-            {"id": hazard_id},
-            {"$set": {"confidence": confidence, "status": status}},
-            projection={"_id": 0},
-            return_document=True,
+    try:
+        res = await _perception_graph.record_hazard_feedback(
+            hazard_id=hazard_id,
+            vehicle_id="v-ego",
+            vehicle_label="Ego Vehicle",
+            feedback_type="confirm",
         )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail="Graph database error")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Unexpected database error")
+
     if not res:
         raise HTTPException(status_code=404, detail="Hazard not found")
+
     return HazardActionResponse(
         id=res["id"], confirmed=res.get("confirmed", 0), reportedIncorrect=res.get("reportedIncorrect", 0)
     )
@@ -776,97 +756,26 @@ async def confirm_hazard(hazard_id: str):
 
 @api_router.post("/sentinel/hazards/{hazard_id}/report-incorrect", response_model=HazardActionResponse)
 async def report_incorrect(hazard_id: str):
-    from services.neo4j_service import Neo4jService
-    vehicle_id = "v-ego"
-    await Neo4jService.record_report_incorrect(vehicle_id, hazard_id)
-    votes = await Neo4jService.get_community_votes(hazard_id)
-    res = await db.hazards.find_one_and_update(
-        {"id": hazard_id},
-        {"$set": {"confirmed": votes["confirmed"], "reportedIncorrect": votes["reportedIncorrect"]}},
-        projection={"_id": 0},
-        return_document=True,
-    )
-    if res:
-        sources_count = res.get("sources", 1)
-        base_confidence = 60 + min(40, (sources_count - 1) * 20)
-        confirmed = res.get("confirmed", 0)
-        reported_incorrect = res.get("reportedIncorrect", 0)
-        confidence = max(0, min(100, int(base_confidence + confirmed * 10 - reported_incorrect * 15)))
-        status = "active"
-        if confidence <= 0 or reported_incorrect >= 5:
-            status = "resolved"
-        res = await db.hazards.find_one_and_update(
-            {"id": hazard_id},
-            {"$set": {"confidence": confidence, "status": status}},
-            projection={"_id": 0},
-            return_document=True,
+    try:
+        res = await _perception_graph.record_hazard_feedback(
+            hazard_id=hazard_id,
+            vehicle_id="v-ego",
+            vehicle_label="Ego Vehicle",
+            feedback_type="report_incorrect",
         )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail="Graph database error")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Unexpected database error")
+
     if not res:
         raise HTTPException(status_code=404, detail="Hazard not found")
+
     return HazardActionResponse(
         id=res["id"], confirmed=res.get("confirmed", 0), reportedIncorrect=res.get("reportedIncorrect", 0)
     )
-
-
-async def _cache_graph_hazard_for_legacy_reads(hazard: dict) -> None:
-    """Non-authoritative temporary read model for db.hazards compatibility.
-
-    Stores only the explicit fields needed by unmigrated legacy routes.
-    Does not persist warnings, _warning_events, source_vehicles, or observations.
-    Failure to cache does not propagate.
-    """
-    try:
-        # Extract location to GeoPoint format
-        loc = hazard.get("location")
-        geo_loc = {}
-        if isinstance(loc, dict):
-            geo_loc = {
-                "latitude": loc.get("latitude"),
-                "longitude": loc.get("longitude"),
-                "headingDegrees": loc.get("headingDegrees"),
-                "label": loc.get("label"),
-            }
-
-        # Extract polygon if present
-        poly = hazard.get("polygon")
-        geo_poly = None
-        if isinstance(poly, list):
-            geo_poly = []
-            for pt in poly:
-                if isinstance(pt, dict):
-                    geo_poly.append({
-                        "latitude": pt.get("latitude"),
-                        "longitude": pt.get("longitude"),
-                        "headingDegrees": pt.get("headingDegrees"),
-                        "label": pt.get("label"),
-                    })
-
-        cache_doc = {
-            "id": hazard["id"],
-            "type": hazard["type"],
-            "label": hazard["label"],
-            "location": geo_loc,
-            "polygon": geo_poly,
-            "distanceMeters": float(hazard.get("distanceMeters", 0.0)),
-            "confidence": int(hazard.get("confidence", 60)),
-            "sources": int(hazard.get("sources", 1)),
-            "observedSecondsAgo": int(hazard.get("observedSecondsAgo", 0)),
-            "direction": hazard.get("direction", "Northbound lane"),
-            "recommendedAction": hazard.get("recommendedAction", "Exercise caution"),
-            "risk": hazard.get("risk", "medium"),
-            "visibilityState": hazard.get("visibilityState", "hidden"),
-            "sourceType": hazard.get("sourceType", "shared_vehicle"),
-            "routeRelevance": hazard.get("routeRelevance", "medium"),
-            "confirmed": int(hazard.get("confirmed", 0)),
-            "reportedIncorrect": int(hazard.get("reportedIncorrect", 0)),
-            "status": hazard.get("status", "active"),
-            "segment_id": hazard.get("segment_id", ""),
-            "created_at": hazard.get("created_at"),
-            "updated_at": hazard.get("updated_at"),
-        }
-        await db.hazards.replace_one({"id": hazard["id"]}, cache_doc, upsert=True)
-    except Exception as e:
-        logger.warning("Cache write failed: %s", type(e).__name__)
 
 
 @api_router.post("/sentinel/demo/observation")
@@ -877,10 +786,6 @@ async def demo_observation(req: DemoObservationRequest):
         ego_location=EGO,
     )
     res = await runner.process_observation(req.model_dump())
-
-    # Backwards-compatibility cache update for unmigrated legacy routes
-    await _cache_graph_hazard_for_legacy_reads(res)
-
     return res
 
 
@@ -895,9 +800,18 @@ async def demo_reset():
             status_code=503,
             detail="Demo reset failed due to graph database error"
         )
-    # 2. Clear temporary Mongo compatibility data
-    await db.hazards.delete_many({})
-    await db.observations.delete_many({})
+    # 2. Clear temporary Mongo compatibility data and obsolete collections
+    obsolete_collections = [
+        "hazards",
+        "observations",
+    ] + [f"neo4j_{c}" for c in [
+        "confirmations", "reports", "hazards", "observations",
+        "warnings", "vehicles", "road_segments", "approaching"
+    ]]
+
+    for coll_name in obsolete_collections:
+        await getattr(db, coll_name).delete_many({})
+
     await db.sentinel_meta.delete_many({})
     # 3. Restore Mongo compatibility + nearby vehicle telemetry
     await ensure_seed()

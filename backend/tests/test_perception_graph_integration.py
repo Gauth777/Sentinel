@@ -285,20 +285,4 @@ async def test_perception_graph_non_fatal():
         assert o_count == 0
 
 
-# ---------------------------------------------------------------------------
-# Demo reset does not invoke legacy Neo4jService.reset_demo_data
-# ---------------------------------------------------------------------------
 
-def test_demo_reset_does_not_call_legacy_neo4j(monkeypatch):
-    from unittest.mock import patch
-    from fastapi.testclient import TestClient
-    from server import app
-
-    def raise_if_called(*args, **kwargs):
-        raise AssertionError("Neo4jService.reset_demo_data was called")
-
-    with patch("services.neo4j_service.Neo4jService.reset_demo_data", raise_if_called):
-        with TestClient(app) as c:
-            r = c.post("/api/sentinel/demo/reset")
-            assert r.status_code == 200
-            assert r.json()["message"] == "Demo data reset successfully"
