@@ -1,12 +1,21 @@
 # Sentinel: Indian Road Scenario Replay & Qwen Perception Engine
 
-Sentinel is a cooperative tactical road safety application. This documentation describes the **Indian Road Scenario Replay** mode, the **Qwen Multimodal VLM Structured Inference** integration, and cooperative hazard warning pipeline.
+Sentinel is a cooperative tactical road safety application. This documentation describes the **Indian Road Scenario Replay** mode, the **Qwen Multimodal VLM Structured Inference** integration, and the authoritative cooperative hazard perception pipeline.
 
 ---
 
-## 1. Dataset Replay Architecture
+## 1. Merged System Architecture
 
-The Replay subsystem enables deterministic simulation of Indian road driving scenarios using synchronized dual-view (Dashcam and Top-view/Map context) research samples.
+The Sentinel backend uses a hybrid storage model where the perception provenance graph acts as the single source of truth for core safety entities.
+
+### Authoritative Graph Storage (Neo4j / PerceptionGraph)
+- **Hazards & Observations**: Creation, matching, spatial lookup, and state resolution of hazards are fully graph-authoritative.
+- **Warnings & Trigger Chains**: `Warning` nodes and their associated `TRIGGERED_WARNING` and `DELIVERED_TO` relationships are persisted only in the graph.
+- **Community Feedback**: Voter `Vehicle` nodes and their corresponding `CONFIRMED` and `REPORTED_INCORRECT` relationships are recorded graph-authoritatively. Monotonicity checks prevent active/resolved status regressions.
+
+### Bounded Document Storage (MongoDB)
+- **Nearby Vehicle Telemetry**: Active vehicle GPS positions and telemetry updates remain backed by MongoDB to support rapid real-time lookup.
+- **Auxiliary States**: Media storage references and static application configs.
 
 ```mermaid
 graph TD
@@ -19,8 +28,7 @@ graph TD
     F -->|Return InferenceResult| E
     E -->|If hazard_presence=yes| I[Replay Activation Service]
     I -->|Create Observation| J[LocalWorkflowRunner]
-    J -->|Upsert Hazard| K[MongoDB collection]
-    J -->|Dispatch Warning| L[Neo4j Perception Graph]
+    J -->|Upsert Hazard & warnings| K[Neo4j Perception Graph]
 ```
 
 - **Independent State**: Maintains current sequence index independently of database contents.
@@ -30,7 +38,7 @@ graph TD
 
 ## 2. Directory Layout & Production Setup
 
- Curated replay scenario data is stored under:
+Curated replay scenario data is stored under:
 ```
 backend/demo_scenarios/
   manifest.json              # Curated samples definition
@@ -50,87 +58,90 @@ To run with production replay assets:
 
 ---
 
-## 3. Qwen Structured Inference & Fallback Policy
+## 3. Environment Setup & Configuration
 
-### Environment Variables
+Configure the backend using the environment variables documented in `backend/.env.example`. Create a local copy as `backend/.env`:
 
-Configure the VLM endpoint using the following environment variables in `backend/.env`:
-
-| Key | Description | Default |
+| Key | Description | Recommended Deployed Default |
 |---|---|---|
+| `PORT` | API port | `8000` |
+| `MONGO_URL` | MongoDB connection URL | `mongodb://localhost:27017` |
+| `DB_NAME` | MongoDB database name | `test_database` |
+| `NEO4J_ENABLED` | Toggle Neo4j integration | `true` |
+| `SENTINEL_NEO4J_STRICT` | Raise errors on Neo4j failure | `true` |
+| `NEO4J_URI` | Neo4j endpoint | `bolt://localhost:7687` |
+| `NEO4J_USERNAME` | Neo4j login user | `neo4j` |
+| `NEO4J_PASSWORD` | Neo4j login password | — |
+| `NEO4J_DATABASE` | Neo4j default database | `neo4j` |
+| `CORS_ORIGINS` | Comma-separated allowed CORS origins | — (defaults to wildcard "*") |
 | `SENTINEL_DEMO_SCENARIO_DIR` | Directory containing manifest.json | `backend/demo_scenarios` |
-| `SENTINEL_QWEN_ENABLED` | Set to `"true"` to attempt live VLM requests | `"false"` |
-| `SENTINEL_QWEN_BASE_URL` | Base URL of the OpenAI-compatible endpoint | — |
-| `SENTINEL_QWEN_API_KEY` | Bearer token for authorization | — |
+| `SENTINEL_QWEN_ENABLED` | Attempt live VLM requests | `false` (unless real API configured) |
+| `SENTINEL_QWEN_BASE_URL` | OpenAI-compatible endpoint URL | — |
+| `SENTINEL_QWEN_API_KEY` | VLM API key | — |
 | `SENTINEL_QWEN_MODEL` | VLM model identifier | `Qwen2.5-VL-7B-Instruct` |
-| `SENTINEL_QWEN_TIMEOUT_SECONDS` | Timeout threshold for live requests | `30` |
-| `SENTINEL_QWEN_PROMPT_VERSION` | Prompt version identifier | `v1` |
-
-### Fallback Policy
-1. **Live Inference**: If `SENTINEL_QWEN_ENABLED=true` and credentials are set, the engine converts local images to base64 Data URLs and runs temperature=0 inference against the configured OpenAI-compatible chat completion endpoint.
-2. **Timeout & Error Handling**: If a request times out or receives malformed/unexpected JSON, the service logs the error and falls back to cached predictions.
-3. **Cached Fallback**: The service checks for `cached_prediction.json` associated with the current sample, parses it, and validates it against the Pydantic schema.
-4. **Failure State**: If neither live inference nor cached predictions succeed, a controlled `422 Unprocessable Content` response is returned. Ground-truth research labels are **never** used as an automatic fallback.
 
 ---
 
-## 4. Hazard Activation & Graph Sync
+## 4. Operational Instructions & Running
 
-When inference detects a hazard (`hazard_presence: "yes"`):
-1. **Observation Mapping**: Creates a Sentinel observation with identifier `obs-replay-{sample_id}-{inference_id}`.
-2. **Observer Vehicle**: Attributed to vehicle `v-replay-observer` ("Sentinel Dataset Observer").
-3. **Workflow Runner**: Feeds the observation into `LocalWorkflowRunner` to create/update the active hazard.
-4. **Deterministic Inference IDs**: Inference IDs are computed from the canonical prediction output (including `warningText`), not timestamps or random values.
-5. **Idempotency**: Repeated activation requests for the same inference ID retrieve the stored result. Per-inference locking prevents concurrent duplicate workflow executions.
-6. **Warning Semantics**: `warningTextGenerated` indicates multilingual warning strings were created. `warningEventCreated` indicates at least one warning was successfully persisted to the perception graph or Neo4j. These are independent booleans.
-7. **Neo4j & Graph**: Records nodes in the perception provenance graph and links approaching vehicles.
+### Starting Backend Locally
+1. Initialize the virtual environment and install dependencies:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   ```
+2. Start the FastAPI server:
+   ```bash
+   .venv/Scripts/python -m uvicorn server:app --port 8000
+   ```
+3. Check status at `http://localhost:8000/api/health`.
+
+### Starting Backend with Docker
+1. Build the container from the repository root:
+   ```bash
+   docker build -t sentinel-backend ./backend
+   ```
+2. Run the container, supplying the required environment variables:
+   ```bash
+   docker run -d -p 8000:8000 --env-file ./backend/.env sentinel-backend
+   ```
+
+### Starting Frontend
+1. Install node dependencies:
+   ```bash
+   cd frontend
+   npm install
+   ```
+2. Configure `frontend/.env` based on `frontend/.env.example`:
+   ```env
+   EXPO_PUBLIC_BACKEND_URL=https://your-backend-api.com
+   ```
+3. Start Expo:
+   ```bash
+   npm run start
+   ```
 
 ---
 
-## 5. API Endpoints
+## 5. Deployed Backend & EAS Preview Workflow
 
-Replay routes are prefixed under `/api/sentinel/demo-replay`:
-
-- `GET /api/sentinel/demo-replay` — Get service configuration and readiness status.
-- `GET /api/sentinel/demo-replay/samples` — List safe metadata for all enabled samples.
-- `GET /api/sentinel/demo-replay/current` — Fetch currently selected sample.
-- `GET /api/sentinel/demo-replay/samples/{sample_id}` — Get single sample metadata.
-- `GET /api/sentinel/demo-replay/samples/{sample_id}/dashcam` — Serve dashcam image.
-- `GET /api/sentinel/demo-replay/samples/{sample_id}/topview` — Serve top-view map.
-- `POST /api/sentinel/demo-replay/advance` — Move pointer to next enabled sample (loops back).
-- `POST /api/sentinel/demo-replay/reset` — Reset pointer to first sample.
-- `POST /api/sentinel/demo-replay/reload` — Re-read manifest.json and refresh sample list without server restart.
-- `POST /api/sentinel/demo-replay/samples/{sample_id}/infer` — Run structured VLM inference. Optional body parameter: `{"activate": true}` (default: true).
+To generate an installable Android preview build:
+1. Ensure the `EXPO_PUBLIC_BACKEND_URL` is set in your Expo builder environment. Do not commit local URLs to source control.
+2. Build the Android preview APK using EAS:
+   ```bash
+   cd frontend
+   npx eas build --platform android --profile preview
+   ```
 
 ---
 
 ## 6. Truthful Demo Claims
 
 To ensure accurate and scientific representation of this work during evaluations:
-- **Dataset Replay Badge**: The console must prominently display `DATASET REPLAY MODE` or `INDIAN ROAD SCENARIO REPLAY`.
+- **Dataset Replay Badge**: The console prominently displays `DATASET REPLAY MODE` or `INDIAN ROAD SCENARIO REPLAY`.
 - **Pre-recorded images**: Replayed images are synchronized dashcam and top-view research samples, not a live camera feed.
 - **No Continuous Online Learning**: The VLM does not update or learn continuously in-context.
 - **Model Training**: Sentinel does not train Qwen from scratch; it utilizes instruction-tuned models for structured reasoning.
 - **Inference Badges**: Distinguish clearly between `LIVE QWEN` and `CACHED QWEN FALLBACK` responses in the console.
 - **Cached Output Is Not Live Output**: Cached predictions are pre-calculated and validated offline. They do not represent live model responses.
 - **Private Replay Assets**: A cloned public repository starts unconfigured. Real research images and cached prediction files are intentionally excluded from version control.
-
----
-
-## 7. Run Instructions
-
-### Start Backend
-1. Initialize virtual environment and start FastAPI server:
-   ```bash
-   cd backend
-   .venv/Scripts/python -m uvicorn server:app --reload --port 8000
-   ```
-2. Check readiness at `http://localhost:8000/api/sentinel/demo-replay`.
-
-### Start Frontend
-1. Start the Expo developer server:
-   ```bash
-   cd frontend
-   npm run start
-   ```
-2. Navigate to `INDIAN ROAD REPLAY` from the main Ghost Vision control panel.

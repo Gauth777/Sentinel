@@ -17,7 +17,7 @@ from starlette.status import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
-    HTTP_413_CONTENT_TOO_LARGE,
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     HTTP_415_UNSUPPORTED_MEDIA_TYPE,
 )
 
@@ -102,7 +102,7 @@ async def upload_media(
     except MediaServiceError as e:
         msg = str(e).lower()
         if "exceeds maximum" in msg:
-            raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+            raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
         if "empty file" in msg:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(e))
         if "unsupported" in msg or "signature" in msg or "does not match" in msg:

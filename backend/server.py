@@ -846,12 +846,33 @@ async def get_perception_graph(
     return graph
 
 
+@api_router.get("/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "graphMode": _perception_graph._mode,
+        "mongoReachable": MONGO_REACHABLE
+    }
+
+
 app.include_router(api_router)
+
+cors_origins_env = os.environ.get("CORS_ORIGINS", "").strip()
+if not cors_origins_env:
+    allow_origins = ["*"]
+else:
+    allow_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+
+# Wildcard "*" blocks credentials
+if "*" in allow_origins:
+    allow_credentials = False
+else:
+    allow_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=allow_credentials,
+    allow_origins=allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
