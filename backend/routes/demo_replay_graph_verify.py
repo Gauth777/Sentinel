@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from starlette.status import HTTP_422_UNPROCESSABLE_CONTENT, HTTP_503_SERVICE_UNAVAILABLE
+from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY, HTTP_503_SERVICE_UNAVAILABLE
 
 from models.demo_replay import DemoReplayGraphVerifyResponse
 from services.perception_graph_service import PerceptionGraphService
@@ -42,7 +42,7 @@ async def graph_verify(
     try:
         graph = await svc.build_graph(hazard_id=hazard_id, limit=1)
     except ValueError as e:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e))
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.error("Graph verification failed: %s", type(e).__name__)
         return DemoReplayGraphVerifyResponse(

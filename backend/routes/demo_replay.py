@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.status import (
     HTTP_404_NOT_FOUND,
-    HTTP_422_UNPROCESSABLE_CONTENT,
+    HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
@@ -186,7 +186,7 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
     except Exception as e:
         logger.error("Inference error for %s: %s", sample_id, type(e).__name__)
         raise HTTPException(
-            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "INFERENCE_UNAVAILABLE",
                 "message": "Inference is unavailable for this sample.",
