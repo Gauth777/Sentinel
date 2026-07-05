@@ -1,3 +1,4 @@
+import json
 import sys
 import urllib.parse
 import urllib.request
@@ -16,15 +17,15 @@ def run_smoke_test():
     if len(sys.argv) < 2:
         print("Usage: python deployment_smoke_test.py <base-url>")
         sys.exit(1)
-        
+
     base_url = sys.argv[1].rstrip("/")
-    
+
     # URL Validation
     is_valid, res = validate_url(base_url)
     if not is_valid:
         print(f"FAIL: {res}")
         sys.exit(1)
-        
+
     endpoints = [
         "/api/health",
         "/api/sentinel/status",
@@ -32,7 +33,7 @@ def run_smoke_test():
         "/api/sentinel/world-model",
         "/api/sentinel/demo-replay"
     ]
-    
+
     failures = 0
     for ep in endpoints:
         url = base_url + ep
@@ -42,14 +43,27 @@ def run_smoke_test():
             with urllib.request.urlopen(req, timeout=5) as response:
                 status_code = response.getcode()
                 if status_code == 200:
-                    print(f"PASS: GET {ep} returned HTTP 200")
+                    if ep == "/api/health":
+                        try:
+                            body = response.read().decode("utf-8")
+                            data = json.loads(body)
+                            if data.get("status") == "ok" and data.get("graphMode") == "neo4j":
+                                print(f"PASS: GET {ep} returned HTTP 200 and health is ok with neo4j")
+                            else:
+                                print(f"FAIL: GET {ep} failed validation. status={data.get('status')}, graphMode={data.get('graphMode')}")
+                                failures += 1
+                        except Exception as parse_err:
+                            print(f"FAIL: GET {ep} failed to parse JSON: {type(parse_err).__name__}")
+                            failures += 1
+                    else:
+                        print(f"PASS: GET {ep} returned HTTP 200")
                 else:
                     print(f"FAIL: GET {ep} returned HTTP {status_code}")
                     failures += 1
         except Exception as e:
             print(f"FAIL: GET {ep} failed with exception: {type(e).__name__}")
             failures += 1
-            
+
     if failures > 0:
         print(f"\nSmoke test FAILED with {failures} endpoint failure(s).")
         sys.exit(1)

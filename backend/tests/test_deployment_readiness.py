@@ -21,7 +21,7 @@ def test_health_endpoint(client):
     assert data["status"] == "ok"
     assert data["graphMode"] in ("neo4j", "memory")
     assert isinstance(data["mongoReachable"], bool)
-    
+
     # Assert no secrets are leaked
     for key, value in data.items():
         val_str = str(value).lower()
@@ -98,23 +98,72 @@ def test_dockerfile_production_command():
 
 def test_smoke_url_validation():
     from scripts.deployment_smoke_test import validate_url
-    
+
     # Valid URLs
     ok, res = validate_url("http://localhost:8000")
     assert ok is True
     ok, res = validate_url("https://sentinel-api.example.com")
     assert ok is True
-    
+
     # Malformed / Wrong scheme URLs
     ok, res = validate_url("ftp://localhost:8000")
     assert ok is False
     assert "scheme" in res
-    
+
     ok, res = validate_url("localhost:8000")
     assert ok is False
     assert "scheme" in res or "host" in res
-    
+
     # Credentials URLs
     ok, res = validate_url("http://user:pass@localhost:8000")
     assert ok is False
     assert "Credentials" in res
+
+
+from unittest.mock import patch, MagicMock
+
+@patch("sys.argv", ["deployment_smoke_test.py", "http://localhost:8000"])
+@patch("urllib.request.urlopen")
+def test_smoke_test_neo4j_success(mock_urlopen):
+    from scripts.deployment_smoke_test import run_smoke_test
+
+    def side_effect(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        mock_resp = MagicMock()
+        mock_resp.getcode.return_value = 200
+        mock_resp.__enter__.return_value = mock_resp
+        if "/api/health" in url:
+            mock_resp.read.return_value = b'{"status": "ok", "graphMode": "neo4j", "mongoReachable": false}'
+        else:
+            mock_resp.read.return_value = b'{}'
+        return mock_resp
+
+    mock_urlopen.side_effect = side_effect
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_smoke_test()
+    assert exc_info.value.code == 0
+
+
+@patch("sys.argv", ["deployment_smoke_test.py", "http://localhost:8000"])
+@patch("urllib.request.urlopen")
+def test_smoke_test_memory_failure(mock_urlopen):
+    from scripts.deployment_smoke_test import run_smoke_test
+
+    def side_effect(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        mock_resp = MagicMock()
+        mock_resp.getcode.return_value = 200
+        mock_resp.__enter__.return_value = mock_resp
+        if "/api/health" in url:
+            mock_resp.read.return_value = b'{"status": "ok", "graphMode": "memory", "mongoReachable": true}'
+        else:
+            mock_resp.read.return_value = b'{}'
+        return mock_resp
+
+    mock_urlopen.side_effect = side_effect
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_smoke_test()
+    assert exc_info.value.code == 1
+
