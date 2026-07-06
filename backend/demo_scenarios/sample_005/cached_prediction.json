@@ -1,0 +1,15 @@
+{
+  "sampleId": "sample_005",
+  "model": "Qwen2.5-VL-7B-Instruct",
+  "promptVersion": "v1",
+  "generatedAt": "USE_THE_ACTUAL_CACHE_CREATION_TIME_IN_UTC",
+  "prediction": {
+    "roadType": "junction",
+    "trafficDensity": "medium",
+    "roadComplexity": "moderate",
+    "hazardPresence": "yes",
+    "anticipatedRisk": "medium",
+    "recommendedAction": "slow_down"
+  },
+  "validated": true
+}
