@@ -39,6 +39,7 @@ export default function HazardBottomSheet({
   onToggle: () => void;
 }) {
   const tint = riskTint(hazard.risk);
+  const formattedDistance = formatDistance(hazard.distanceMeters);
   return (
     <Animated.View
       entering={FadeInDown.duration(350)}
@@ -76,7 +77,10 @@ export default function HazardBottomSheet({
       </Pressable>
 
       <View style={styles.metricsRow}>
-        <Metric label="DISTANCE" value={formatDistance(hazard.distanceMeters) === "\u2014" ? "\u2014" : `≈${formatDistance(hazard.distanceMeters)}`} />
+        <Metric
+          label="DISTANCE"
+          value={formattedDistance === "\u2014" ? "\u2014" : `\u2248${formattedDistance}`}
+        />
         <View style={styles.vline} />
         <Metric label="CONFIDENCE" value={`${hazard.confidence}`} unit="%" />
         <View style={styles.vline} />

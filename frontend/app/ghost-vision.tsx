@@ -485,7 +485,6 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-ignore capture-observation route exists in app directory
                     router.push("/capture-observation");
                   }}
                   style={({ pressed }) => [styles.captureBtn, pressed && { opacity: 0.85 }]}
@@ -498,7 +497,6 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-ignore demo-replay route exists in app directory
                     router.push("/demo-replay");
                   }}
                   style={({ pressed }) => [styles.replayBtn, pressed && { opacity: 0.85 }]}
@@ -511,7 +509,6 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-ignore training-data route exists in app directory
                     router.push("/training-data");
                   }}
                   style={({ pressed }) => [styles.datasetLabBtn, pressed && { opacity: 0.85 }]}

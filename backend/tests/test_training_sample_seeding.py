@@ -18,7 +18,7 @@ from models.demo_replay import DemoReplaySample, DemoLocation, DemoExpectedLabel
 async def test_seeding_in_memory_mode():
     # 1. Mock DemoReplayService
     demo_replay_service = MagicMock()
-    
+
     # 5 enabled samples
     samples = []
     for i in range(1, 6):
@@ -43,9 +43,9 @@ async def test_seeding_in_memory_mode():
             )
         )
         samples.append(sample)
-        
+
     demo_replay_service.get_enabled_samples = AsyncMock(return_value=samples)
-    
+
     # Returns valid cached prediction for all 5
     async def mock_get_cached_prediction(sample_id):
         return {
@@ -68,29 +68,29 @@ async def test_seeding_in_memory_mode():
             },
             "validated": True
         }
-    
+
     demo_replay_service.get_cached_prediction = AsyncMock(side_effect=mock_get_cached_prediction)
-    
+
     # Initialize service in memory mode
     svc = TrainingSampleService(db=None, mongo_reachable=False)
     await svc.initialize()
-    
+
     # Run seed
     await svc.seed_memory_mode(demo_replay_service)
-    
+
     # Verify exactly 5 samples loaded
     stats = await svc.get_stats()
     assert stats.total == 5
     assert stats.pending == 5
     assert stats.verified == 0
     assert stats.rejected == 0
-    
+
     # Verify deterministic IDs
     for i in range(1, 6):
         sample = await svc.get_sample(f"ts-replay-sample_00{i}")
         assert sample is not None
         assert sample.sample_id == f"ts-replay-sample_00{i}"
-        
+
     # Idempotency check: second seed call remains at 5
     await svc.seed_memory_mode(demo_replay_service)
     stats2 = await svc.get_stats()
@@ -100,7 +100,7 @@ async def test_seeding_in_memory_mode():
 @pytest.mark.anyio
 async def test_seeding_skips_malformed_cached_prediction():
     demo_replay_service = MagicMock()
-    
+
     # 2 enabled samples
     samples = []
     for i in range(1, 3):
@@ -117,9 +117,9 @@ async def test_seeding_skips_malformed_cached_prediction():
             tags=["tag"]
         )
         samples.append(sample)
-        
+
     demo_replay_service.get_enabled_samples = AsyncMock(return_value=samples)
-    
+
     # Returns valid cached prediction for sample 1, and None (malformed) for sample 2
     async def mock_get_cached_prediction(sample_id):
         if sample_id == "sample_001":
@@ -139,14 +139,14 @@ async def test_seeding_skips_malformed_cached_prediction():
                 "validated": True
             }
         return None
-        
+
     demo_replay_service.get_cached_prediction = AsyncMock(side_effect=mock_get_cached_prediction)
-    
+
     svc = TrainingSampleService(db=None, mongo_reachable=False)
     await svc.initialize()
-    
+
     await svc.seed_memory_mode(demo_replay_service)
-    
+
     # Should only successfully seed sample_001
     stats = await svc.get_stats()
     assert stats.total == 1
@@ -157,17 +157,17 @@ async def test_seeding_skips_malformed_cached_prediction():
 @pytest.mark.anyio
 async def test_mongo_mode_is_not_seeded():
     demo_replay_service = MagicMock()
-    
+
     # Setup mock Mongo db database collections
     mock_db = MagicMock()
     mock_coll = MagicMock()
     mock_coll.count_documents = AsyncMock(return_value=0)
     mock_db.__getitem__ = MagicMock(return_value=mock_coll)
-    
+
     svc = TrainingSampleService(db=mock_db, mongo_reachable=True)
-    
+
     # Run seed
     await svc.seed_memory_mode(demo_replay_service)
-    
+
     # get_enabled_samples should not even have been called because it skips mongo mode
     assert not demo_replay_service.get_enabled_samples.called
