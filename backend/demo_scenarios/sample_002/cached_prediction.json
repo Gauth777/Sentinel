@@ -1,0 +1,15 @@
+{
+  "sampleId": "sample_002",
+  "model": "Qwen2.5-VL-7B-Instruct",
+  "promptVersion": "v1",
+  "generatedAt": "2026-06-30T12:05:00Z",
+  "prediction": {
+    "roadType": "highway",
+    "trafficDensity": "high",
+    "roadComplexity": "moderate",
+    "hazardPresence": "no",
+    "anticipatedRisk": "medium",
+    "recommendedAction": "slow_down"
+  },
+  "validated": true
+}

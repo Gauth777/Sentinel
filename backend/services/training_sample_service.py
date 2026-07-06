@@ -588,3 +588,132 @@ class TrainingSampleService:
             export_lines.append(export_dict)
 
         return export_lines
+
+    async def seed_memory_mode(self, demo_replay_service: Any) -> None:
+        """Seed memory database with the five curated replay samples.
+
+        Runs only in memory mode. Idempotent. Malformed samples are skipped and logged.
+        """
+        if self._mode != "memory":
+            logger.info("TrainingSampleService: skip seeding because mode is %s", self._mode)
+            return
+
+        import json
+        from models.training_samples import (
+            Context,
+            GeoLocation,
+            TelemetrySource,
+            Media,
+            MediaType,
+            StorageMode,
+            ModelInfo,
+            InferenceMode as TrainingInferenceMode,
+            PredictionLabels,
+            Provenance,
+            ProvenanceSource,
+            QualityMetadata,
+            PrivacyStatus
+        )
+
+        try:
+            enabled_samples = await demo_replay_service.get_enabled_samples()
+        except Exception as e:
+            logger.error("Failed to retrieve enabled samples for seeding: %s", e)
+            return
+
+        for sample in enabled_samples:
+            sample_id = f"ts-replay-{sample.sample_id}"
+
+            # Idempotency check
+            try:
+                existing = await self.get_sample(sample_id)
+                if existing is not None:
+                    continue
+            except Exception:
+                pass
+
+            # Fetch and validate cached prediction
+            cached_pred = await demo_replay_service.get_cached_prediction(sample.sample_id)
+            if cached_pred is None:
+                logger.warning("Skipping training sample seed for %s: cached prediction missing or malformed", sample.sample_id)
+                continue
+
+            try:
+                lat = sample.location.latitude if sample.location else 0.0
+                lon = sample.location.longitude if sample.location else 0.0
+                captured_at = sample.captured_at or datetime.now(timezone.utc)
+
+                context = Context(
+                    location=GeoLocation(latitude=lat, longitude=lon),
+                    heading_degrees=sample.heading_degrees,
+                    speed_kmh=None,
+                    road_name=None,
+                    route_direction=None,
+                    telemetry_source=TelemetrySource.demo
+                )
+
+                media = Media(
+                    type=MediaType.image,
+                    uri=f"demo://{sample.dashcam_path}",
+                    mime_type="image/jpeg",
+                    storage_mode=StorageMode.demo_uri
+                )
+
+                model_info = ModelInfo(
+                    provider="Qwen",
+                    name=cached_pred.get("model", "Qwen2.5-VL-7B-Instruct"),
+                    version="2.5",
+                    prompt_version=cached_pred.get("promptVersion", "v1"),
+                    inference_id=f"inf-replay-{sample.sample_id}",
+                    inference_mode=TrainingInferenceMode.demo
+                )
+
+                pred_data = cached_pred.get("prediction", {})
+                prediction = PredictionLabels(
+                    road_type=pred_data.get("roadType"),
+                    traffic_density=pred_data.get("trafficDensity"),
+                    road_complexity=pred_data.get("roadComplexity"),
+                    hazard_presence=pred_data.get("hazardPresence"),
+                    anticipated_risk=pred_data.get("anticipatedRisk"),
+                    recommended_action=pred_data.get("recommendedAction"),
+                    confidence=cached_pred.get("runtimeHazard", {}).get("confidence") if cached_pred.get("runtimeHazard") else None,
+                    raw_response=cached_pred.get("rawResponse")
+                )
+
+                provenance = Provenance(
+                    source=ProvenanceSource.demo,
+                    session_id=None,
+                    device_id=None
+                )
+
+                notes = []
+                if sample.topview_path:
+                    notes.append(f"topview: demo://{sample.topview_path}")
+                if sample.expected_labels:
+                    expected_dict = sample.expected_labels.model_dump(by_alias=True)
+                    notes.append(f"expected_labels: {json.dumps(expected_dict)}")
+
+                quality = QualityMetadata(
+                    privacy_status=PrivacyStatus.not_reviewed,
+                    unusable_reason=None,
+                    notes=notes if notes else None
+                )
+
+                payload = TrainingSampleCreate(
+                    sample_id=sample_id,
+                    source_vehicle_id="v-replay-observer",
+                    captured_at=captured_at,
+                    context=context,
+                    media=media,
+                    model=model_info,
+                    prediction=prediction,
+                    provenance=provenance,
+                    quality=quality
+                )
+
+                await self.create_sample(payload)
+                logger.info("Successfully seeded training sample: %s", sample_id)
+
+            except Exception as e:
+                logger.warning("Failed to seed training sample %s: %s", sample.sample_id, e)
+                continue

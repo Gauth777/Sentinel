@@ -127,12 +127,14 @@ def set_store(store: ReplayActivationStore) -> None:
 async def activate_inference(
     result: InferenceResult,
     sample_location: Optional[Dict[str, float]],
+    heading_degrees: Optional[float] = None,
 ) -> ActivationResult:
     """Map an inference result to a Sentinel observation via the hazard workflow.
 
     Args:
         result: Completed InferenceResult with prediction
         sample_location: GPS location dict with latitude/longitude, or None
+        heading_degrees: Optional heading in degrees from the sample
 
     Returns:
         ActivationResult with activated=True/False
@@ -224,9 +226,29 @@ async def activate_inference(
         }
 
         try:
+            import math
             from workflows.hazard_workflow import LocalWorkflowRunner
+            from utils.geo import destination_point
 
-            runner = LocalWorkflowRunner()
+            is_valid_heading = False
+            if heading_degrees is not None and isinstance(heading_degrees, (int, float)) and math.isfinite(heading_degrees):
+                is_valid_heading = True
+
+            if is_valid_heading:
+                heading = float(heading_degrees)
+            else:
+                heading = 0.0
+
+            reverse_bearing = (heading + 180.0) % 360.0
+
+            simulated_ego = destination_point(
+                latitude=lat,
+                longitude=lon,
+                bearing_degrees=reverse_bearing,
+                distance_meters=90.0,
+            )
+
+            runner = LocalWorkflowRunner(ego_location=simulated_ego)
             hazard_result = await runner.process_observation(observation)
 
             hazard_id = hazard_result.get("id") if hazard_result else None

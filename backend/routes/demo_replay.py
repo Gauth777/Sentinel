@@ -233,7 +233,7 @@ async def infer_sample(request: Request, sample_id: str, body: Optional[InferReq
                     "longitude": sample.location.longitude,
                 }
 
-            activation = await activate_inference(result, location)
+            activation = await activate_inference(result, location, heading_degrees=sample.heading_degrees)
             response["activation"] = ActivationPublicResponse(
                 activated=activation.activated,
                 reason=activation.reason,

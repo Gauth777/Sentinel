@@ -1,0 +1,152 @@
+{
+  "schemaVersion": "1.0",
+  "mode": "dataset_replay",
+  "loop": true,
+  "samples": [
+    {
+      "sampleId": "sample_001",
+      "sequenceIndex": 1,
+      "title": "Delhi Outer Ring Road Junction",
+      "description": "High traffic density at highway junction in Delhi",
+      "dashcamPath": "sample_001/dashcam.jpg",
+      "topviewPath": "sample_001/topview.png",
+      "location": {
+        "latitude": 28.535984,
+        "longitude": 77.113022
+      },
+      "headingDegrees": 180.0,
+      "capturedAt": "2026-06-29T10:00:00Z",
+      "tags": [
+        "highway",
+        "high_traffic",
+        "indian_road"
+      ],
+      "expectedLabels": {
+        "roadType": "highway",
+        "trafficDensity": "high",
+        "roadComplexity": "moderate",
+        "hazardPresence": "no",
+        "anticipatedRisk": "medium",
+        "recommendedAction": "slow_down"
+      },
+      "cachedPredictionPath": "sample_001/cached_prediction.json",
+      "enabled": true
+    },
+    {
+      "sampleId": "sample_002",
+      "sequenceIndex": 2,
+      "title": "NH-48 Approach Junction",
+      "description": "Dense flow approaching major junction on highway",
+      "dashcamPath": "sample_002/dashcam.jpg",
+      "topviewPath": "sample_002/topview.png",
+      "location": {
+        "latitude": 28.536296,
+        "longitude": 77.113639
+      },
+      "headingDegrees": 185.0,
+      "capturedAt": "2026-06-29T10:05:00Z",
+      "tags": [
+        "highway",
+        "high_traffic",
+        "indian_road"
+      ],
+      "expectedLabels": {
+        "roadType": "highway",
+        "trafficDensity": "high",
+        "roadComplexity": "simple",
+        "hazardPresence": "no",
+        "anticipatedRisk": "medium",
+        "recommendedAction": "slow_down"
+      },
+      "cachedPredictionPath": "sample_002/cached_prediction.json",
+      "enabled": true
+    },
+    {
+      "sampleId": "sample_003",
+      "sequenceIndex": 3,
+      "title": "Chandigarh Residential Sector Street",
+      "description": "Clear residential road with low traffic density in Chandigarh",
+      "dashcamPath": "sample_003/dashcam.jpg",
+      "topviewPath": "sample_003/topview.png",
+      "location": {
+        "latitude": 30.705581,
+        "longitude": 76.769182
+      },
+      "headingDegrees": 90.0,
+      "capturedAt": "2026-06-29T10:10:00Z",
+      "tags": [
+        "residential",
+        "low_traffic",
+        "indian_road"
+      ],
+      "expectedLabels": {
+        "roadType": "residential",
+        "trafficDensity": "low",
+        "roadComplexity": "simple",
+        "hazardPresence": "no",
+        "anticipatedRisk": "low",
+        "recommendedAction": "maintain_speed"
+      },
+      "cachedPredictionPath": "sample_003/cached_prediction.json",
+      "enabled": true
+    },
+    {
+      "sampleId": "sample_004",
+      "sequenceIndex": 4,
+      "title": "Lajpat Nagar Urban Arterial",
+      "description": "Urban arterial street with moderate road complexity and active road hazard",
+      "dashcamPath": "sample_004/dashcam.jpg",
+      "topviewPath": "sample_004/topview.png",
+      "location": {
+        "latitude": 28.572938,
+        "longitude": 77.257879
+      },
+      "headingDegrees": 0.0,
+      "capturedAt": "2026-06-29T10:15:00Z",
+      "tags": [
+        "urban_arterial",
+        "low_traffic",
+        "indian_road"
+      ],
+      "expectedLabels": {
+        "roadType": "urban_arterial",
+        "trafficDensity": "low",
+        "roadComplexity": "moderate",
+        "hazardPresence": "yes",
+        "anticipatedRisk": "medium",
+        "recommendedAction": "slow_down"
+      },
+      "cachedPredictionPath": "sample_004/cached_prediction.json",
+      "enabled": true
+    },
+    {
+      "sampleId": "sample_005",
+      "sequenceIndex": 5,
+      "title": "Mathura Road Urban Arterial",
+      "description": "Low traffic density on urban arterial segment in New Delhi",
+      "dashcamPath": "sample_005/dashcam.jpg",
+      "topviewPath": "sample_005/topview.png",
+      "location": {
+        "latitude": 28.594701,
+        "longitude": 77.072801
+      },
+      "headingDegrees": 5.0,
+      "capturedAt": "2026-06-29T10:20:00Z",
+      "tags": [
+        "urban_arterial",
+        "low_traffic",
+        "indian_road"
+      ],
+      "expectedLabels": {
+        "roadType": "junction",
+        "trafficDensity": "high",
+        "roadComplexity": "complex",
+        "hazardPresence": "yes",
+        "anticipatedRisk": "high",
+        "recommendedAction": "yield"
+      },
+      "cachedPredictionPath": "sample_005/cached_prediction.json",
+      "enabled": true
+    }
+  ]
+}

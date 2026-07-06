@@ -9,3 +9,25 @@
 !README.md
 !manifest.example.json
 !source_map.example.json
+# Curated hackathon demo pack
+!manifest.json
+
+!sample_001/dashcam.jpg
+!sample_001/topview.png
+!sample_001/cached_prediction.json
+
+!sample_002/dashcam.jpg
+!sample_002/topview.png
+!sample_002/cached_prediction.json
+
+!sample_003/dashcam.jpg
+!sample_003/topview.png
+!sample_003/cached_prediction.json
+
+!sample_004/dashcam.jpg
+!sample_004/topview.png
+!sample_004/cached_prediction.json
+
+!sample_005/dashcam.jpg
+!sample_005/topview.png
+!sample_005/cached_prediction.json

@@ -565,6 +565,14 @@ async def lifespan(app: FastAPI):
     # 4. Remaining services
     await _training_samples.initialize()
     await _demo_replay.initialize()
+
+    # Seed training samples in memory mode
+    if _training_samples._mode == "memory":
+        try:
+            await _training_samples.seed_memory_mode(_demo_replay)
+        except Exception as e:
+            logger.error("Failed to seed training samples in lifespan: %s", e)
+
     try:
         yield
     finally:
