@@ -23,6 +23,7 @@ import HazardBottomSheet from "@/src/components/ghost-vision/HazardBottomSheet";
 import MapLegend from "@/src/components/ghost-vision/MapLegend";
 import MapErrorState from "@/src/components/ghost-vision/MapErrorState";
 import { boundsAround } from "@/src/components/ghost-vision/projection";
+import { formatDistanceForSpeech } from "@/src/utils/distanceFormat";
 import type { Hazard } from "@/src/types/sentinel";
 import { api, ApiError } from "@/src/api/sentinel";
 import { trainingApi } from "@/src/api/trainingSamples";
@@ -110,8 +111,9 @@ export default function GhostVisionScreen() {
     spokenForId.current = active.id;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     
+    const formattedDist = formatDistanceForSpeech(active.distanceMeters);
     const text = active.warnings?.[selectedLanguage] ?? 
-      `${active.label}. Approximately ${active.distanceMeters} metres ahead. ${active.recommendedAction}.`;
+      `${active.label}. Approximately ${formattedDist} ahead. ${active.recommendedAction}.`;
     
     Speech.speak(text, { rate: 0.95, pitch: 1.0 });
   }, [active, muted, isFocused, selectedLanguage]);
@@ -483,7 +485,7 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-expect-error capture-observation route exists in app directory
+                    // @ts-ignore capture-observation route exists in app directory
                     router.push("/capture-observation");
                   }}
                   style={({ pressed }) => [styles.captureBtn, pressed && { opacity: 0.85 }]}
@@ -496,7 +498,7 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-expect-error demo-replay route exists in app directory
+                    // @ts-ignore demo-replay route exists in app directory
                     router.push("/demo-replay");
                   }}
                   style={({ pressed }) => [styles.replayBtn, pressed && { opacity: 0.85 }]}
@@ -509,7 +511,7 @@ export default function GhostVisionScreen() {
                 <Pressable
                   onPress={() => {
                     Haptics.selectionAsync().catch(() => {});
-                    // @ts-expect-error training-data route exists in app directory
+                    // @ts-ignore training-data route exists in app directory
                     router.push("/training-data");
                   }}
                   style={({ pressed }) => [styles.datasetLabBtn, pressed && { opacity: 0.85 }]}

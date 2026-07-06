@@ -579,7 +579,7 @@ export default function DemoReplayScreen() {
             <Pressable
               onPress={() => {
                 Haptics.selectionAsync().catch(() => {});
-                // @ts-expect-error training-data route exists in app directory
+                // @ts-ignore training-data route exists in app directory
                 router.push("/training-data");
               }}
               style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.85 }]}

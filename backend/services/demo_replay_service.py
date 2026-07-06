@@ -319,6 +319,13 @@ class DemoReplayService:
                     return s
             return None
 
+    async def get_enabled_samples(self) -> List[DemoReplaySample]:
+        """Return all enabled samples."""
+        async with self._lock:
+            if self._manifest is None:
+                return []
+            return list(self._manifest.enabled_samples())
+
     # ------------------------------------------------------------------
     # Evidence helpers
     # ------------------------------------------------------------------

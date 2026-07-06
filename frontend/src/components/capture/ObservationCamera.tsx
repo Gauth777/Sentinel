@@ -126,53 +126,58 @@ export default function ObservationCamera({ onCapture, disabled }: Props) {
 
   return (
     <View style={styles.container} testID="capture-camera">
-      <CameraView style={styles.camera} ref={cameraRef} facing="back" mode="picture">
-        <View style={styles.overlay}>
-          <View style={styles.topBar}>
-            <Text style={styles.topBarText}>Rear camera · tap shutter to capture</Text>
-          </View>
-          <View style={styles.bottomBar}>
-            {isCapturing ? (
-              <View style={styles.capturingIndicator}>
-                <ActivityIndicator color={colors.brand} />
-                <Text style={styles.capturingText}>Capturing image…</Text>
-              </View>
-            ) : captureError ? (
-              <View style={styles.errorContainer} testID="capture-camera-error">
-                <MaterialCommunityIcons name="alert-circle" size={20} color={colors.error} />
-                <Text style={styles.errorText}>{captureError}</Text>
-                <Pressable
-                  onPress={handleRetry}
-                  style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.85 }]}
-                  testID="capture-camera-retry"
-                >
-                  <Text style={styles.retryBtnText}>Retry</Text>
-                </Pressable>
-              </View>
-            ) : (
-              <Pressable
-                onPress={handleCapture}
-                disabled={disabled}
-                style={({ pressed }) => [
-                  styles.shutterBtn,
-                  pressed && !disabled && { opacity: 0.85 },
-                  disabled && styles.shutterBtnDisabled,
-                ]}
-                testID="capture-shutter"
-              >
-                <View style={styles.shutterInner} />
-              </Pressable>
-            )}
-          </View>
+      <CameraView style={styles.camera} ref={cameraRef} facing="back" mode="picture" />
+      <View style={styles.overlay}>
+        <View style={styles.topBar}>
+          <Text style={styles.topBarText}>Rear camera · tap shutter to capture</Text>
         </View>
-      </CameraView>
+        <View style={styles.bottomBar}>
+          {isCapturing ? (
+            <View style={styles.capturingIndicator}>
+              <ActivityIndicator color={colors.brand} />
+              <Text style={styles.capturingText}>Capturing image…</Text>
+            </View>
+          ) : captureError ? (
+            <View style={styles.errorContainer} testID="capture-camera-error">
+              <MaterialCommunityIcons name="alert-circle" size={20} color={colors.error} />
+              <Text style={styles.errorText}>{captureError}</Text>
+              <Pressable
+                onPress={handleRetry}
+                style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.85 }]}
+                testID="capture-camera-retry"
+              >
+                <Text style={styles.retryBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              onPress={handleCapture}
+              disabled={disabled}
+              style={({ pressed }) => [
+                styles.shutterBtn,
+                pressed && !disabled && { opacity: 0.85 },
+                disabled && styles.shutterBtnDisabled,
+              ]}
+              testID="capture-shutter"
+            >
+              <View style={styles.shutterInner} />
+            </Pressable>
+          )}
+        </View>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  camera: { flex: 1 },
+  camera: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
   overlay: {
     flex: 1,
     justifyContent: "space-between",

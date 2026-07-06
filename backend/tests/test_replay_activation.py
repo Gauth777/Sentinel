@@ -521,3 +521,61 @@ async def test_no_hazard_reports_both_false():
     activation = await activate_inference(result, SAMPLE_LOCATION)
     assert activation.warning_text_generated is False
     assert activation.warning_event_created is False
+
+
+@pytest.mark.anyio
+async def test_replay_activation_distance_semantics():
+    # Mock perception graph service
+    mock_graph = AsyncMock()
+    mock_graph.get_observation_hazard = AsyncMock(return_value=None)
+    mock_graph.find_similar_active_hazard = AsyncMock(return_value=None)
+
+    async def fake_upsert(observation_id, vehicle_id, vehicle_label, hazard_id, hazard_type, hazard_label, latitude, longitude, road_segment_id, road_segment_name, timestamp, hazard_fields):
+        hz = dict(hazard_fields)
+        hz["id"] = hazard_id
+        hz["type"] = hazard_type
+        hz["label"] = hazard_label
+        hz["location"] = {"latitude": latitude, "longitude": longitude}
+        return {"hazard": hz}
+
+    mock_graph.upsert_observation_and_hazard = AsyncMock(side_effect=fake_upsert)
+    mock_graph.record_warning = AsyncMock()
+    mock_graph.get_warning_recipient_vehicle_ids = AsyncMock(return_value=[])
+
+    with patch("server._perception_graph", mock_graph):
+        result = make_inference_result()
+
+        # Test case 1: heading 0 degrees
+        sample_loc = {"latitude": 28.535984, "longitude": 77.113022}
+
+        activation = await activate_inference(result, sample_loc, heading_degrees=0.0)
+        assert activation.activated is True
+
+        call_args = mock_graph.upsert_observation_and_hazard.call_args[1]
+        assert call_args["latitude"] == 28.535984
+        assert call_args["longitude"] == 77.113022
+
+        dist = call_args["hazard_fields"]["distanceMeters"]
+        assert 85.0 <= dist <= 95.0
+
+        # Test case 2: heading 90 degrees
+        set_store(ReplayActivationStore())
+        mock_graph.upsert_observation_and_hazard.reset_mock()
+        activation_90 = await activate_inference(result, sample_loc, heading_degrees=90.0)
+        assert activation_90.activated is True
+        call_args_90 = mock_graph.upsert_observation_and_hazard.call_args[1]
+        assert call_args_90["latitude"] == 28.535984
+        assert call_args_90["longitude"] == 77.113022
+        dist_90 = call_args_90["hazard_fields"]["distanceMeters"]
+        assert 85.0 <= dist_90 <= 95.0
+
+        # Test case 3: missing/invalid heading fallback
+        set_store(ReplayActivationStore())
+        mock_graph.upsert_observation_and_hazard.reset_mock()
+        activation_invalid = await activate_inference(result, sample_loc, heading_degrees=None)
+        assert activation_invalid.activated is True
+        call_args_invalid = mock_graph.upsert_observation_and_hazard.call_args[1]
+        assert call_args_invalid["latitude"] == 28.535984
+        assert call_args_invalid["longitude"] == 77.113022
+        dist_invalid = call_args_invalid["hazard_fields"]["distanceMeters"]
+        assert 85.0 <= dist_invalid <= 95.0

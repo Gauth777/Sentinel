@@ -7,6 +7,7 @@ import Animated, { FadeInDown } from "react-native-reanimated";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import type { Hazard } from "@/src/types/sentinel";
+import { formatDistance } from "@/src/utils/distanceFormat";
 
 function riskTint(risk: Hazard["risk"]) {
   return risk === "high" ? colors.error : risk === "medium" ? colors.warning : colors.success;
@@ -75,7 +76,7 @@ export default function HazardBottomSheet({
       </Pressable>
 
       <View style={styles.metricsRow}>
-        <Metric label="DISTANCE" value={`≈${hazard.distanceMeters}`} unit="m" />
+        <Metric label="DISTANCE" value={formatDistance(hazard.distanceMeters) === "\u2014" ? "\u2014" : `≈${formatDistance(hazard.distanceMeters)}`} />
         <View style={styles.vline} />
         <Metric label="CONFIDENCE" value={`${hazard.confidence}`} unit="%" />
         <View style={styles.vline} />
