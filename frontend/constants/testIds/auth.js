@@ -3,10 +3,7 @@
 // Button / Switch and friends. Add new keys here as you wire up additional
 // auth UI; see ./index.js for the recipe to add a new feature file.
 //
-// React Native uses `testID` (camelCase, no dash), not `data-testid`:
-//   import { LOGIN } from '../constants/testIds';
-//   <TouchableOpacity testID={LOGIN.submitButton} onPress={...} />
-//   <TextInput testID={LOGIN.emailInput} ... />
+
 //
 // Directive:
 //   - Keys are camelCase, values are kebab-case shaped as `<feature>-<element>`
