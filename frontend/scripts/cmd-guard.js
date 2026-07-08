@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Dynamic command guard — entry point (logic lives in ./cmd-guard/).
-// Called by install-guard.sh (shim), the package.json preinstall hook, and sync-shims.sh.
+
 // Modes: --cmd <bin> --args <...> | --preinstall | --list-commands
 // Shim exit codes: 0 allow, 1 block, 2 rewrite (replacement argv on stdout).
 
