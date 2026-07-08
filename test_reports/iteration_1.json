@@ -21,3 +21,4 @@
   "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_sentinel.py. Run: pytest backend/tests/test_sentinel.py -v. Frontend testIDs are stable and cover the full flow. EXPO_PUBLIC_BACKEND_URL is the external URL used by the app.",
   "rca_of_issue": "N/A - no bugs found"
 }
+
