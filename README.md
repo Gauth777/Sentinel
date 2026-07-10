@@ -1,147 +1,387 @@
-# Sentinel: Indian Road Scenario Replay & Qwen Perception Engine
+<img width="4320" height="1440" alt="HackHazards 2026 main poster" src="https://github.com/user-attachments/assets/c698b2cd-da84-4cb0-9276-125c6a7244aa" />
 
-Sentinel is a cooperative tactical road safety application. This documentation describes the **Indian Road Scenario Replay** mode, the **Qwen Multimodal VLM Structured Inference** integration, and the authoritative cooperative hazard perception pipeline.
+# 🚘 Sentinel
+
+> **Cooperative Perception for Autonomous Vehicles on Indian Roads**  
+> A multimodal road hazard intelligence system that combines dashcam vision, top-view map context, VLM reasoning, and graph-based provenance to warn vehicles about hidden hazards before they become directly visible.
 
 ---
 
-## 1. Merged System Architecture
+## 📌 Problem & Domain
 
-The Sentinel backend uses a hybrid storage model where the perception provenance graph acts as the single source of truth for core safety entities.
+Autonomous driving is difficult on Indian roads because the environment is rarely clean or predictable. Vehicles deal with mixed traffic, unclear lane discipline, irregular junctions, temporary obstacles, blind spots, potholes, and hazards that may appear too late for a single vehicle to react safely.
 
-### Authoritative Graph Storage (Neo4j / PerceptionGraph)
-- **Hazards & Observations**: Creation, matching, spatial lookup, and state resolution of hazards are fully graph-authoritative.
-- **Warnings & Trigger Chains**: `Warning` nodes and their associated `TRIGGERED_WARNING` and `DELIVERED_TO` relationships are persisted only in the graph.
-- **Community Feedback**: Voter `Vehicle` nodes and their corresponding `CONFIRMED` and `REPORTED_INCORRECT` relationships are recorded graph-authoritatively. Monotonicity checks prevent active/resolved status regressions.
+Most perception systems focus on what one vehicle can see at one moment. Sentinel explores a different layer: **cooperative road intelligence**. If one observer vehicle has already detected or understood a hazard, an approaching vehicle should be warned before it reaches the same danger zone.
 
-### Bounded Document Storage (MongoDB)
-- **Nearby Vehicle Telemetry**: Active vehicle GPS positions and telemetry updates remain backed by MongoDB to support rapid real-time lookup.
-- **Auxiliary States**: Media storage references and static application configs.
+**Themes Selected:**
+- [ ] Human Experience & Productivity  
+- [ ] Climate & Sustainability Systems  
+- [ ] HealthTech & Bio Platforms  
+- [ ] Learning & Knowledge Systems  
+- [ ] Work, Finance & Digital Economy  
+- [x] **Infrastructure, Mobility & Smart Systems**  
+- [ ] Trust, Identity & Security  
+- [ ] Media, Social & Interactive Platforms  
+- [ ] Public Systems, Governance and Civic Tech  
+- [ ] Developer Tools & Software Infrastructure  
+
+---
+
+## 🎯 Objective
+
+Sentinel aims to make autonomous and driver-assist systems more context-aware on complex Indian roads.
+
+### Target Users
+- Autonomous vehicle research teams
+- Driver-assist system developers
+- Intelligent transportation and smart mobility platforms
+- Road safety monitoring systems
+- Dataset and VLM evaluation researchers
+
+### Pain Point
+Traditional object detection can identify entities such as cars, bikes, trucks, or pedestrians, but it does not fully answer higher-level driving questions:
+
+- Is this road segment a junction or an arterial road?
+- Is the traffic density increasing?
+- Is the road layout complex?
+- Is there a hazard beyond the current line of sight?
+- Should the vehicle slow down, yield, prepare to stop, or increase attention?
+
+### Value Provided
+Sentinel uses multimodal perception and graph verification to demonstrate how road hazards can be observed, persisted, verified, and shared across vehicles. The system turns isolated vehicle observations into a cooperative warning layer.
+
+---
+
+## 🧠 Team & Approach
+
+### Team Name
+`Sentinel`
+
+### Team Members
+- **Naman** — Full-stack development, Expo mobile frontend, FastAPI backend integration, VLM replay pipeline, Neo4j AuraDB graph verification, demo workflow
+
+> Add other team members here if applicable.
+
+### Our Approach
+
+Sentinel was built around one core idea: **a vehicle cannot react to what it cannot yet see**.
+
+To explore this, we designed a working hackathon prototype with four connected layers:
+
+1. **Mobile warning interface** — a driver-facing Expo app for hazard alerts and replay visualization.
+2. **Backend intelligence layer** — a FastAPI/Python service that serves replay samples, predictions, warnings, and graph verification.
+3. **Multimodal VLM reasoning** — paired dashcam + top-view map context processed through cached genuine Qwen2.5-VL outputs.
+4. **Graph provenance layer** — Neo4j AuraDB stores the relationship between vehicles, observations, hazards, warnings, and dispatch events.
+
+The project intentionally includes a replay/evidence mode so that the demo is not only UI-driven. It shows model predictions, ground-truth comparisons, and graph persistence behind the warning shown to the driver.
+
+---
+
+## 🛠️ Tech Stack
+
+### Core Technologies Used
+
+- **Frontend:** Expo React Native, Expo Router, React Native, TypeScript
+- **Backend:** Python, FastAPI, Uvicorn
+- **Database / Graph:** Neo4j AuraDB, Neo4j Python Driver
+- **Auxiliary Storage:** MongoDB / Motor for bounded telemetry and supporting state
+- **AI / VLM:** Qwen2.5-VL cached prediction outputs for deterministic dataset replay
+- **Data Context:** Paired dashcam images + top-view/map images
+- **Hosting / Build:** Render backend deployment, EAS Build for Android preview builds
+- **Mobile Capabilities:** Expo Location, Expo Speech, Expo Haptics, Expo Camera-ready structure
+
+### Additional Technologies Used
+
+- [x] AI / ML  
+- [ ] Web3 / Blockchain  
+- [ ] Cyber Security  
+- [x] Cloud  
+
+---
+
+## 🏆 Sponsored Track
+
+- [x] **Expo Track** — Built using Expo  
+- [x] **Neo4j Track** — Uses AuraDB for graph-based hazard provenance  
+- [ ] **Base44 Track** — Not used  
+
+### How Sentinel uses Expo
+
+Sentinel uses **Expo React Native** as the complete mobile frontend layer. The app was built as a driver-facing interface for cooperative road hazard intelligence.
+
+Expo powers the main mobile screens:
+
+- **Drive View / Ghost Vision**
+- **Two-vehicle demo controls**
+- **Hidden hazard alerts**
+- **Sentinel Road Replay**
+- **Research Provenance & Evidence**
+- **Dataset Lab**
+
+The app communicates with the FastAPI backend through `EXPO_PUBLIC_BACKEND_URL` to fetch replay samples, cached Qwen2.5-VL predictions, hazard warning data, and Neo4j graph verification status.
+
+In the driver view, the approaching vehicle queries the shared hazard layer and receives a hidden hazard warning with distance, confidence, source vehicle count, and a recommended action such as **slow down**.
+
+Expo and EAS Build helped turn Sentinel into a real mobile demo instead of only a web dashboard.
+
+### How Sentinel uses Neo4j AuraDB
+
+Sentinel uses **Neo4j AuraDB** as the graph verification and provenance layer for cooperative perception.
+
+The graph models the real-world relationships between:
+
+- `Vehicle`
+- `Observation`
+- `Hazard`
+- `Warning`
+- Road and replay context
+
+When an observer vehicle detects or reports a hazard, Sentinel creates or verifies the relevant hazard and observation nodes. The observation is connected to the hazard through a provenance relationship, and the generated warning is connected to the approaching vehicle.
+
+This allows the system to represent the full cooperative flow:
+
+```text
+Observer Vehicle → Observation → Hazard → Warning → Approaching Vehicle
+```
+
+In the app demo, Sentinel verifies that:
+
+- the hazard node exists,
+- the observation node exists,
+- the provenance relationship is present,
+- the warning dispatch has been recorded,
+- graph-level metadata such as node count, edge count, warning count, and relationship types is available.
+
+AuraDB makes the warning credible because the alert shown in the mobile app is backed by graph state, not just a static UI card.
+
+---
+
+## ✨ Key Features
+
+- ✅ **Cooperative Perception Flow** — one vehicle observes a hazard and another approaching vehicle receives an early warning.
+- ✅ **Hidden Hazard Warning** — alerts can be shown before the danger is directly visible to the approaching vehicle.
+- ✅ **Dashcam + Map Multimodal Reasoning** — paired street-view and top-view context support richer road-scene understanding.
+- ✅ **Cached Genuine Qwen2.5-VL Replay** — deterministic replay mode uses previously generated VLM prediction outputs.
+- ✅ **Ground Truth vs Prediction Comparison** — compares Qwen outputs against expected labels for road type, traffic density, complexity, hazard presence, risk, and recommended action.
+- ✅ **Neo4j Graph Verification** — verifies hazard, observation, warning, and provenance relationships.
+- ✅ **Dataset Lab Workflow** — supports sample review, verification, correction, rejection, and export-oriented workflow.
+- ✅ **Voice + Haptic Alerts** — Expo Speech and Haptics support driver-facing warning feedback.
+
+---
+
+## 🧩 System Architecture
 
 ```mermaid
 graph TD
-    A[Replay Service] -->|Load manifest.json| B[curated sequence]
-    B -->|Serve current state| C[GET /current]
-    B -->|Serve images| D[dashcam.jpg & topview.png]
-    E[Replay Client] -->|POST /infer| F[Vision Inference Service]
-    F -->|Try Live| G[OpenAICompatibleQwenAdapter]
-    F -->|Fallback| H[CachedQwenAdapter]
-    F -->|Return InferenceResult| E
-    E -->|If hazard_presence=yes| I[Replay Activation Service]
-    I -->|Create Observation| J[LocalWorkflowRunner]
-    J -->|Upsert Hazard & warnings| K[Neo4j Perception Graph]
+    A[Expo React Native App] -->|API Requests| B[FastAPI Backend]
+    B --> C[Demo Replay Service]
+    C --> D[Dashcam + Top-view Samples]
+    C --> E[Cached Qwen2.5-VL Predictions]
+    B --> F[Hazard Activation Service]
+    F --> G[Neo4j AuraDB Perception Graph]
+    G --> H[Vehicles / Observations / Hazards / Warnings]
+    B --> I[Dataset Lab + Verification APIs]
+    A --> J[Driver Alert UI / Road Replay / Dataset Lab]
 ```
 
-- **Independent State**: Maintains current sequence index independently of database contents.
-- **Security Boundaries**: Filesystem paths, expected research labels, and cached prediction files are strictly isolated from client-facing routes. Path traversal and absolute paths are validated and rejected.
+### Architecture Summary
+
+1. The Expo app requests current replay state or live/demo hazard state.
+2. The FastAPI backend serves replay samples and prediction results.
+3. Cached Qwen2.5-VL outputs provide structured road-scene labels.
+4. Hazard-positive samples activate the cooperative warning pipeline.
+5. Neo4j AuraDB persists and verifies hazard provenance.
+6. The mobile UI displays warnings, graph verification, and dataset evidence.
 
 ---
 
-## 2. Directory Layout & Production Setup
+## 🧪 VLM Replay Labels
 
-Curated replay scenario data is stored under:
+Sentinel focuses on structured road-scene intelligence rather than only object detection.
+
+The replay pipeline works with labels such as:
+
+- `road_type`
+- `traffic_density`
+- `road_complexity`
+- `hazard_presence`
+- `anticipated_risk`
+- `recommended_action`
+
+Example recommended actions include:
+
+- `slow_down`
+- `maintain_speed`
+- `increase_attention`
+- `yield`
+- `prepare_to_stop`
+- `change_lane`
+
+This makes the system more useful for autonomous-driving research because the model is asked to reason about scene context and driving response, not only detect objects.
+
+---
+
+## 📽️ Demo & Deliverables
+
+- **Demo Video Link:** _Add YouTube / demo video link here_  
+- **Deployment Link:** _Add Render backend / live app link here_  
+- **Expo / EAS Build Link:** _Add APK or EAS build link here_  
+- **Pitch Deck / PPT:** _Add presentation link here_  
+- **Repository:** https://github.com/Gauth777/Sentinel
+
+---
+
+## ✅ Tasks & Bonus Checklist
+
+- [ ] All team members completed the mandatory social task  
+- [ ] Bonus Task 1 – Badge sharing  
+- [ ] Bonus Task 2 – Blog/article  
+
+---
+
+## 🧪 How to Run the Project
+
+### Requirements
+
+- Node.js / npm or yarn
+- Python 3.10+
+- Expo CLI / EAS CLI
+- Neo4j AuraDB instance
+- MongoDB instance if using telemetry-backed local state
+- Backend environment variables configured through `.env`
+
+---
+
+### Backend Setup
+
+```bash
+cd backend
+pip install -r requirements.txt
+python -m uvicorn server:app --host 0.0.0.0 --port 8000
 ```
+
+Health check:
+
+```bash
+http://localhost:8000/api/health
+```
+
+---
+
+### Frontend Setup
+
+```bash
+cd frontend
+npm install
+npm run start
+```
+
+For Android preview:
+
+```bash
+cd frontend
+npx eas build --platform android --profile preview
+```
+
+---
+
+### Environment Variables
+
+Backend variables are documented in `backend/.env.example`. Important variables include:
+
+```env
+PORT=8000
+MONGO_URL=mongodb://localhost:27017
+DB_NAME=test_database
+NEO4J_ENABLED=true
+SENTINEL_NEO4J_STRICT=true
+NEO4J_URI=neo4j+s://your-aura-instance.databases.neo4j.io
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your-password
+NEO4J_DATABASE=neo4j
+SENTINEL_DEMO_SCENARIO_DIR=backend/demo_scenarios
+SENTINEL_QWEN_ENABLED=false
+SENTINEL_QWEN_MODEL=Qwen2.5-VL-7B-Instruct
+```
+
+Frontend variables:
+
+```env
+EXPO_PUBLIC_BACKEND_URL=https://your-backend-api.com
+```
+
+Do not commit API keys, database passwords, or private dataset paths.
+
+---
+
+## 🗂️ Demo Scenario Structure
+
+Curated replay scenarios are expected in the following structure:
+
+```text
 backend/demo_scenarios/
-  manifest.json              # Curated samples definition
-  README.md                  # Schema description and documentation
+  manifest.json
   sample_001/
-    dashcam.jpg              # Dashcam perspective image
-    topview.png              # Top-down road context image
-    cached_prediction.json   # Pre-calculated Qwen response
+    dashcam.jpg
+    topview.png
+    cached_prediction.json
   sample_002/
-    ...
+    dashcam.jpg
+    topview.png
+    cached_prediction.json
+  ...
 ```
 
-To run with production replay assets:
-1. Create a `manifest.json` under `backend/demo_scenarios/` (or copy and modify `manifest.example.json`).
-2. Populate `sample_001/` to `sample_005/` with your matched `dashcam.jpg` and `topview.png` pairs.
-3. Configure `cached_prediction.json` for each sample to enable deterministic fallbacks.
+Each sample pairs street-level dashcam evidence with a top-view/map context image and a cached prediction response.
 
 ---
 
-## 3. Environment Setup & Configuration
+## 🔬 Truthful Demo Claims
 
-Configure the backend using the environment variables documented in `backend/.env.example`. Create a local copy as `backend/.env`:
+Sentinel is a research and demonstration prototype, not a production autonomous-driving system.
 
-| Key | Description | Recommended Deployed Default |
-|---|---|---|
-| `PORT` | API port | `8000` |
-| `MONGO_URL` | MongoDB connection URL | `mongodb://localhost:27017` |
-| `DB_NAME` | MongoDB database name | `test_database` |
-| `NEO4J_ENABLED` | Toggle Neo4j integration | `true` |
-| `SENTINEL_NEO4J_STRICT` | Raise errors on Neo4j failure | `true` |
-| `NEO4J_URI` | Neo4j endpoint | `bolt://localhost:7687` |
-| `NEO4J_USERNAME` | Neo4j login user | `neo4j` |
-| `NEO4J_PASSWORD` | Neo4j login password | — |
-| `NEO4J_DATABASE` | Neo4j default database | `neo4j` |
-| `CORS_ORIGINS` | Comma-separated allowed CORS origins | — (defaults to wildcard "*") |
-| `SENTINEL_DEMO_SCENARIO_DIR` | Directory containing manifest.json | `backend/demo_scenarios` |
-| `SENTINEL_QWEN_ENABLED` | Attempt live VLM requests | `false` (unless real API configured) |
-| `SENTINEL_QWEN_BASE_URL` | OpenAI-compatible endpoint URL | — |
-| `SENTINEL_QWEN_API_KEY` | VLM API key | — |
-| `SENTINEL_QWEN_MODEL` | VLM model identifier | `Qwen2.5-VL-7B-Instruct` |
+To keep the project scientifically accurate:
+
+- Replayed images are synchronized dashcam and top-view research/demo samples.
+- Cached Qwen predictions are pre-computed outputs used for deterministic replay.
+- Sentinel does not train Qwen from scratch.
+- The VLM does not continuously learn during the demo.
+- The project demonstrates a cooperative perception layer, not a complete autonomous driving stack.
+- Private credentials, full research datasets, and secrets are not committed to the repository.
 
 ---
 
-## 4. Operational Instructions & Running
+## 🧬 Future Scope
 
-### Starting Backend Locally
-1. Initialize the virtual environment and install dependencies:
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   ```
-2. Start the FastAPI server:
-   ```bash
-   .venv/Scripts/python -m uvicorn server:app --port 8000
-   ```
-3. Check status at `http://localhost:8000/api/health`.
-
-### Starting Backend with Docker
-1. Build the container from the repository root:
-   ```bash
-   docker build -t sentinel-backend ./backend
-   ```
-2. Run the container, supplying the required environment variables:
-   ```bash
-   docker run -d -p 8000:8000 --env-file ./backend/.env sentinel-backend
-   ```
-
-### Starting Frontend
-1. Install node dependencies:
-   ```bash
-   cd frontend
-   npm install
-   ```
-2. Configure `frontend/.env` based on `frontend/.env.example`:
-   ```env
-   EXPO_PUBLIC_BACKEND_URL=https://your-backend-api.com
-   ```
-3. Start Expo:
-   ```bash
-   npm run start
-   ```
+- 📈 Expand from 5 replay samples to a larger Indian-road benchmark dataset.
+- 🚗 Integrate real-time multi-vehicle telemetry and V2V/V2X communication.
+- 🧠 Add live VLM inference mode with latency and confidence monitoring.
+- 🗺️ Improve map-matching and geospatial hazard localization.
+- 🔒 Add stronger trust, verification, and abuse prevention for shared hazard reports.
+- 📊 Build analytics for model errors, false positives, and replay-based evaluation.
+- 🌐 Support more Indian languages for driver alerts.
 
 ---
 
-## 5. Deployed Backend & EAS Preview Workflow
+## 📎 Resources / Credits
 
-To generate an installable Android preview build:
-1. Ensure the `EXPO_PUBLIC_BACKEND_URL` is set in your Expo builder environment. Do not commit local URLs to source control.
-2. Build the Android preview APK using EAS:
-   ```bash
-   cd frontend
-   npx eas build --platform android --profile preview
-   ```
+- Expo React Native ecosystem
+- FastAPI and Python backend stack
+- Neo4j AuraDB graph database
+- Qwen2.5-VL for vision-language reasoning
+- Paired dashcam + top-view/map road-scene samples
+- HackHazards'26 organizer template and submission structure
 
 ---
 
-## 6. Truthful Demo Claims
+## 🏁 Final Words
 
-To ensure accurate and scientific representation of this work during evaluations:
-- **Dataset Replay Badge**: The console prominently displays `DATASET REPLAY MODE` or `INDIAN ROAD SCENARIO REPLAY`.
-- **Pre-recorded images**: Replayed images are synchronized dashcam and top-view research samples, not a live camera feed.
-- **No Continuous Online Learning**: The VLM does not update or learn continuously in-context.
-- **Model Training**: Sentinel does not train Qwen from scratch; it utilizes instruction-tuned models for structured reasoning.
-- **Inference Badges**: Distinguish clearly between `LIVE QWEN` and `CACHED QWEN FALLBACK` responses in the console.
-- **Cached Output Is Not Live Output**: Cached predictions are pre-calculated and validated offline. They do not represent live model responses.
-- **Private Replay Assets**: A cloned public repository starts unconfigured. Real research images and cached prediction files are intentionally excluded from version control.
+Sentinel was built to explore a simple but important question:
+
+> What if vehicles did not have to discover every road hazard alone?
+
+By combining dashcam vision, map context, VLM reasoning, and graph-backed provenance, Sentinel demonstrates how autonomous systems can move from isolated object detection toward shared road-scene understanding.
+
+The final goal is not just vehicles that see better — it is vehicles that understand earlier.
+
+---
